@@ -138,6 +138,9 @@ class NormalizationController extends Controller
         $nodes = [];
         $edges = [];
 
+        // dd($tables);
+         $allTableNames = array_column($tables, 'name');
+
         foreach ($tables as $table) {
             $nodes[] = [
                 'id' => $table['name'],
@@ -147,7 +150,7 @@ class NormalizationController extends Controller
 
             // Detect foreign keys (columns ending with _id)
             foreach ($table['columns'] as $col) {
-                $referencedTable = $this->detectReferencedTable($col['name'], $table['name']);
+                $referencedTable = $this->detectReferencedTable($col['name'], $allTableNames);
                 if ($referencedTable) {
                     $edges[] = [
                         'from' => $table['name'],
@@ -159,7 +162,7 @@ class NormalizationController extends Controller
         }
 
         return response()->json([
-            'nodes' => array_unique($nodes),
+            'nodes' => $nodes,
             'edges' => $edges,
         ]);
     }
