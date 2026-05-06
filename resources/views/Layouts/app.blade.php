@@ -10,6 +10,7 @@
     <style>
         body { font-family: 'Inter', sans-serif; }
     </style>
+    @stack('css')
 </head>
 <body class="bg-gray-50">
     <nav class="bg-white shadow-sm border-b border-gray-200">
