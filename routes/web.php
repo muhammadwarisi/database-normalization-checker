@@ -7,5 +7,5 @@ Route::get('/',                       [WebController::class, 'index'])->name('ho
 Route::get('/upload',                 [WebController::class, 'upload'])->name('upload');
 Route::post('/parse',                 [WebController::class, 'parseTables'])->name('parse');
 Route::post('/analyze',               [WebController::class, 'analyze'])->name('analyze');
-Route::get('/results/{project_id}',   [WebController::class, 'results'])->name('results');
-Route::get('/visualize/{project_id}', [WebController::class, 'visualize'])->name('visualize');
+Route::get('/results',                [WebController::class, 'results'])->name('results');
+Route::get('/visualize',              [WebController::class, 'visualize'])->name('visualize');

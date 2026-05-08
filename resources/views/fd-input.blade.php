@@ -1,13 +1,13 @@
 @extends('layouts.app')
 
-@section('title', 'Input Functional Dependencies')
+@section('title', 'Input Ketergantungan Fungsional')
 
 @section('content')
     <div class="max-w-4xl mx-auto">
         <div class="mb-8">
-            <h1 class="text-3xl font-bold text-gray-900 mb-2">Functional Dependencies</h1>
+            <h1 class="text-3xl font-bold text-gray-900 mb-2">Ketergantungan Fungsional</h1>
             <p class="text-gray-600">
-                Dependencies below are auto-generated from your schema. Review and adjust if needed before analyzing.
+                Ketergantungan di bawah ini dibuat otomatis dari skema Anda. Tinjau dan sesuaikan jika diperlukan sebelum menganalisis.
             </p>
         </div>
 
@@ -21,11 +21,11 @@
                     <div class="px-6 py-4 bg-gray-50 border-b border-gray-200">
                         <h2 class="text-lg font-semibold text-gray-900">{{ $table['name'] }}</h2>
                         <p class="text-sm text-gray-500 mt-1">
-                            Primary key:
+                            Kunci Utama:
                             @if (!empty($table['pk_columns']))
                                 <span class="font-mono text-blue-700">({{ implode(', ', $table['pk_columns']) }})</span>
                             @else
-                                <span class="text-red-500">No primary key defined</span>
+                                <span class="text-red-500">Tidak ada kunci utama yang didefinisikan</span>
                             @endif
                         </p>
                     </div>
@@ -34,7 +34,7 @@
 
                         {{-- Kolom sebagai referensi --}}
                         <div class="mb-5">
-                            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">Available columns</p>
+                            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">Kolom Tersedia</p>
                             <div class="flex flex-wrap gap-2">
                                 @foreach ($table['columns'] as $col)
                                     <span
@@ -59,8 +59,7 @@
                                         clip-rule="evenodd" />
                                 </svg>
                                 <p class="text-xs text-blue-700">
-                                    Dependencies below are auto-generated from column naming patterns.
-                                    Add, remove, or modify them if they don't match your actual schema design.
+                                    Ketergantungan di bawah ini dibuat otomatis dari pola penamaan kolom. Tambahkan, hapus, atau ubah jika tidak sesuai dengan desain skema Anda yang sebenarnya.
                                 </p>
                             </div>
                         @endif
@@ -71,7 +70,7 @@
                                 <div class="fd-row flex items-start gap-3">
                                     {{-- LHS checkboxes --}}
                                     <div class="flex-1">
-                                        <label class="block text-xs text-gray-500 mb-1">LHS — determinant</label>
+                                        <label class="block text-xs text-gray-500 mb-1">LHS — penentu</label>
                                         <div
                                             class="flex flex-wrap gap-2 p-3 border border-gray-300 rounded-md bg-gray-50 min-h-[44px]">
                                             @foreach ($table['columns'] as $col)
@@ -96,10 +95,10 @@
 
                                     {{-- RHS select --}}
                                     <div class="flex-1">
-                                        <label class="block text-xs text-gray-500 mb-1">RHS — dependent</label>
+                                        <label class="block text-xs text-gray-500 mb-1">RHS — dependen</label>
                                         <select name="fds[{{ $table['name'] }}][{{ $fdIndex }}][rhs]"
                                             class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:ring-blue-500 focus:border-blue-500">
-                                            <option value="">-- select --</option>
+                                            <option value="">-- pilih --</option>
                                             @foreach ($table['columns'] as $col)
                                                 @if (!$col['pk'])
                                                     <option value="{{ $col['name'] }}"
@@ -175,7 +174,7 @@
                         <button type="button"
                             onclick="addFdRow({{ $tableIndex }}, '{{ $table['name'] }}', {{ json_encode($table['columns']) }})"
                             class="mt-4 inline-flex items-center px-4 py-2 border border-dashed border-blue-400 text-sm font-medium rounded-md text-blue-600 hover:bg-blue-50">
-                            + Add Dependency
+                            + Tambah Ketergantungan
                         </button>
 
                     </div>
@@ -184,11 +183,11 @@
 
             <div class="flex items-center justify-between mt-6">
                 <a href="{{ route('upload') }}" class="text-gray-600 hover:text-gray-900 text-sm font-medium">
-                    ← Back
+                    ← Kembali
                 </a>
                 <button type="submit"
                     class="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700">
-                    Analyze Normalization
+                    Analisis Normalisasi
                 </button>
             </div>
         </form>

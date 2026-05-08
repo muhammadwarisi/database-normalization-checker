@@ -224,7 +224,7 @@ class NormalizationAnalyzer
                     'name'    => $tableName,
                     'columns' => $columns,
                     'analysis' => [
-                        'recommendations' => ['Error analyzing: ' . $e->getMessage()],
+                        'recommendations' => ['Terjadi kesalahan saat menganalisis: ' . $e->getMessage()],
                         '1NF' => ['status' => false],
                         '2NF' => ['status' => false],
                     ],
@@ -254,7 +254,7 @@ class NormalizationAnalyzer
 
         // Generate recommendations berdasarkan normalization status
         if (!$is2NF) {
-            $recommendations[] = 'Table has partial dependencies on primary key. Decompose according to partial dependencies.';
+            $recommendations[] = 'Tabel memiliki ketergantungan parsial pada kunci utama. Pisahkan berdasarkan ketergantungan parsial.';
             foreach ($result->partialDependencies as $fd) {
                 $recommendations[] = "  • " . (string)$fd;
             }
