@@ -9,7 +9,7 @@
             <h1 class="text-3xl font-bold text-gray-900">{{ $project->name }}</h1>
             <p class="text-gray-500 text-sm mt-1">Analyzed {{ $project->created_at->diffForHumans() }}</p>
         </div>
-        <a href="{{ route('visualize', $project->project_id) }}"
+        <a href="{{ route('visualize') }}"
             class="inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50">
             <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
@@ -56,15 +56,15 @@
             </div>
             @if($is2NF === true)
                 <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800">
-                    ✓ Passes 2NF
+                    ✓ Memenuhi 2NF
                 </span>
             @elseif($is2NF === false)
                 <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800">
-                    ✗ Violates 2NF
+                    ✗ Melanggar 2NF
                 </span>
             @else
                 <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-gray-100 text-gray-600">
-                    — Skipped
+                    — Dilewati
                 </span>
             @endif
         </div>

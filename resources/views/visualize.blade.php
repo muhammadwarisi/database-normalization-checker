@@ -14,7 +14,7 @@
     </div>
 
     <div class="flex items-center justify-between">
-        <a href="{{ route('results', $project->project_id) }}"
+        <a href="{{ route('results') }}"
             class="inline-flex items-center text-blue-600 hover:text-blue-700 font-medium">
             <svg class="w-5 h-5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
@@ -34,16 +34,12 @@
         </div>
     </div>
 
-    {{-- Load Vis.js --}}
-    
     @push('scripts')
     <link href="https://unpkg.com/vis-network/styles/vis-network.min.css" rel="stylesheet" />
     <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
         <script>
             (async function() {
-
-                const response = await fetch('/api/visualize/{{ $project->project_id }}');
-                const data = await response.json();
+                const data = @json($visualizationData);
                 console.log('nodes:', data.nodes);
                 console.log('edges:', data.edges);
                 const nodes = new vis.DataSet(

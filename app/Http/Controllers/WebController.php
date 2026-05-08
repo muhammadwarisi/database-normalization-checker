@@ -2,12 +2,10 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\Project;
 use App\Services\DBMLParser;
 use App\Services\FunctionalDependency;
 use App\Services\NormalizationAnalyzer;
 use Illuminate\Http\Request;
-use Illuminate\Support\Str;
 
 class WebController extends Controller
 {
@@ -19,8 +17,7 @@ class WebController extends Controller
     // GET /
     public function index()
     {
-        $projects = Project::orderBy('created_at', 'desc')->limit(10)->get();
-        return view('welcome', compact('projects'));
+        return redirect()->route('upload');
     }
 
     // GET /upload
@@ -85,9 +82,9 @@ class WebController extends Controller
                     'name'     => $tableName,
                     'columns'  => $table['columns'],
                     'analysis' => [
-                        '1NF'             => ['status' => true,  'message' => 'Assumed in 1NF'],
-                        '2NF'             => ['status' => null,  'message' => 'No functional dependencies provided, skipped'],
-                        'recommendations' => ['Provide functional dependencies to enable 2NF analysis.'],
+                        '1NF'             => ['status' => true,  'message' => 'Diasumsikan dalam 1NF'],
+                        '2NF'             => ['status' => null,  'message' => 'Tidak ada functional dependencies yang diberikan, dilewati'],
+                        'recommendations' => ['Berikan functional dependencies untuk mengaktifkan analisis 2NF.'],
                         'candidate_keys'  => [],
                         'partial_deps'    => [],
                         'decomposed_relations' => [],
@@ -108,8 +105,8 @@ class WebController extends Controller
 
             if (!$result->is2NF) {
                 foreach ($result->partialDependencies as $fd) {
-                    $recommendations[] = 'Partial dependency found: ' . (string) $fd
-                        . ' — move to a separate table with key (' . implode(', ', $fd->lhs) . ')';
+                    $recommendations[] = 'Ketergantungan parsial ditemukan: ' . (string) $fd
+                        . ' — pindahkan ke tabel terpisah dengan kunci (' . implode(', ', $fd->lhs) . ')';
                 }
             }
 
@@ -136,13 +133,13 @@ class WebController extends Controller
                 'analysis' => [
                     '1NF' => [
                         'status'  => true,
-                        'message' => 'Table is in 1NF',
+                        'message' => 'Tabel berada dalam 1NF',
                     ],
                     '2NF' => [
                         'status'  => $result->is2NF,
                         'message' => $result->is2NF
-                            ? 'Table is in 2NF'
-                            : 'Table violates 2NF — partial dependencies found',
+                            ? 'Tabel berada dalam 2NF'
+                            : 'Tabel melanggar 2NF — ketergantungan parsial ditemukan',
                     ],
                     'candidate_keys'       => $result->candidateKeys,
                     'partial_deps'         => array_map(fn($fd) => (string) $fd, $result->partialDependencies),
@@ -154,34 +151,93 @@ class WebController extends Controller
             ];
         }
 
-        $project = Project::create([
-            'project_id'      => (string) Str::uuid(),
-            'name'            => $projectName,
-            'dbml_text'       => $dbmlText,
+        // Store analysis result in session (no database storage)
+        session([
             'analysis_result' => $analysisResult,
             'tables_count'    => count($tables),
             'issues_count'    => $issuesCount,
             'passed_tables'   => $passedTables,
-            'status'          => 'analyzed',
+            'project_name'    => $projectName,
         ]);
 
-        session()->forget(['project_name', 'dbml_text', 'tables']);
+        session()->forget(['dbml_text', 'tables']);
 
-        return redirect()->route('results', $project->project_id);
+        return redirect()->route('results');
     }
 
-    // GET /results/{project_id}
-    public function results(string $projectId)
+    // GET /results
+    public function results()
     {
-        $project = Project::where('project_id', $projectId)->firstOrFail();
+        $analysisResult = session('analysis_result');
+        if (empty($analysisResult)) {
+            return redirect()->route('upload')
+                ->withErrors(['session' => 'Session expired. Please upload DBML again.']);
+        }
+
+        // Create a temporary object to pass to view with session data
+        $project = (object) [
+            'name'              => session('project_name', 'Unnamed Project'),
+            'tables_count'      => session('tables_count', 0),
+            'issues_count'      => session('issues_count', 0),
+            'passed_tables'     => session('passed_tables', 0),
+            'analysis_result'   => $analysisResult,
+            'created_at'        => now(),
+        ];
+
         return view('results', compact('project'));
     }
 
-    // GET /visualize/{project_id}
-    public function visualize(string $projectId)
+    // GET /visualize
+    public function visualize()
     {
-        $project = Project::where('project_id', $projectId)->firstOrFail();
-        return view('visualize', compact('project'));
+        $analysisResult = session('analysis_result');
+        if (empty($analysisResult)) {
+            return redirect()->route('upload')
+                ->withErrors(['session' => 'Session expired. Please upload DBML again.']);
+        }
+
+        // Create a temporary object to pass to view with session data
+        $project = (object) [
+            'name'              => session('project_name', 'Unnamed Project'),
+            'tables_count'      => session('tables_count', 0),
+            'issues_count'      => session('issues_count', 0),
+            'passed_tables'     => session('passed_tables', 0),
+            'analysis_result'   => $analysisResult,
+            'created_at'        => now(),
+        ];
+
+        // Generate visualization data from session
+        $tables = $analysisResult['tables'] ?? [];
+        $nodes = [];
+        $edges = [];
+        $allTableNames = array_column($tables, 'name');
+
+        foreach ($tables as $table) {
+            $nodes[] = [
+                'id' => $table['name'],
+                'label' => $table['name'],
+                'fields' => array_map(fn($col) => $col['name'], $table['columns'])
+            ];
+
+            // Detect foreign keys (columns ending with _id)
+            foreach ($table['columns'] as $col) {
+                $referencedTable = $this->detectReferencedTable($col['name'], $allTableNames);
+                if ($referencedTable) {
+                    $edges[] = [
+                        'from' => $table['name'],
+                        'to' => $referencedTable,
+                        'via' => $col['name'],
+                    ];
+                }
+            }
+        }
+
+        $visualizationData = [
+            'nodes' => $nodes,
+            'edges' => $edges,
+        ];
+
+        return view('visualize', compact('project', 'visualizationData'));
     }
 
     // ----------------------------------------------------------------
@@ -215,5 +271,36 @@ class WebController extends Controller
         }
 
         return $fds;
+    }
+
+    private function detectReferencedTable(string $columnName, array $tableNames)
+    {
+        if (!str_ends_with($columnName, '_id')) {
+            return null;
+        }
+
+        $base = substr($columnName, 0, -3);
+
+        // 1) Cek exact match
+        if (in_array($base, $tableNames)) {
+            return $base;
+        }
+
+        // 2) Cek plural (product → products)
+        if (in_array($base . 's', $tableNames)) {
+            return $base . 's';
+        }
+
+        // 3) Cek plural irregular (category → categories)
+        if (in_array($base . 'ies', $tableNames)) {
+            return $base . 'ies';
+        }
+
+        // 4) Cek singular (users → user)
+        if (in_array(rtrim($base, 's'), $tableNames)) {
+            return rtrim($base, 's');
+        }
+
+        return null;
     }
 }
