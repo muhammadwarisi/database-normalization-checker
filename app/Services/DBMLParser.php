@@ -29,8 +29,8 @@ class DBMLParser
         $dbmlText = preg_replace('/\/\/.*$/m', '', $dbmlText);
         $dbmlText = preg_replace('/\/\*.*?\*\//s', '', $dbmlText);
 
-        // Extract semua block Table { }
-        preg_match_all('/Table\s+(\w+)\s*\{([^}]+)\}/s', $dbmlText, $matches, PREG_SET_ORDER);
+        // Pattern: Table "name" { ... } atau Table name { ... }
+        preg_match_all('/Table\s+"?(\w+)"?\s*\{([^}]+)\}/s', $dbmlText, $matches, PREG_SET_ORDER);
 
         if (empty($matches)) {
             throw new \Exception('No tables found in DBML.');
@@ -128,13 +128,14 @@ class DBMLParser
     private function parseColumns(string $tableBody): array
     {
         $columns = [];
-        $lines   = explode("\n", $tableBody);
+        $lines = explode("\n", $tableBody);
 
         foreach ($lines as $line) {
             $line = trim($line);
             if (empty($line)) continue;
 
-            if (preg_match('/^(\w+)\s+(\w+(?:\([^)]+\))?(?:\[\])?)\s*(.*)$/', $line, $colMatch)) {
+            // Mencocokkan: "nama" tipe [atribut] atau nama tipe [atribut]
+            if (preg_match('/^"?(\w+)"?\s+([a-zA-Z][a-zA-Z0-9_()]+)\s*(.*)$/', $line, $colMatch)) {
                 $columnName = $colMatch[1];
                 $columnType = $colMatch[2];
                 $attributes = $colMatch[3] ?? '';
@@ -200,6 +201,7 @@ class DBMLParser
 
     private function hasAttribute(string $attributes, string $attr): bool
     {
-        return stripos($attributes, $attr) !== false;
+        // Mencari kata $attr di dalam kurung siku, sebagai whole word
+        return preg_match('/\[.*\b' . preg_quote($attr, '/') . '\b.*\]/i', $attributes) === 1;
     }
 }
