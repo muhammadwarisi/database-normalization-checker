@@ -27,24 +27,56 @@ class SQLParser
      */
     public function parse(string $sqlText): array
     {
+        $sqlText = preg_replace('/^\xEF\xBB\xBF/', '', $sqlText);
+
+        // Validasi format yang didukung
+        $lowerSql = strtolower($sqlText);
+        if (str_contains($lowerSql, 'sqlite')) {
+            throw new \Exception('SQLite format is not supported. Please use MySQL or PostgreSQL.');
+        }
+
+        // Cek apakah ada CREATE TABLE sama sekali
+        if (!preg_match('/CREATE\s+TABLE/i', $sqlText)) {
+            throw new \Exception('No CREATE TABLE statements found. Please make sure your SQL file contains table definitions.');
+        }
+        // Preprocessing
+        $sqlText = preg_replace('/^\xEF\xBB\xBF/', '', $sqlText);
+        $sqlText = preg_replace('/^\/\*.*?\*\/;?\s*/ms', '', $sqlText);
+        $sqlText = preg_replace('/^SET\s+\w.*?;/mi', '', $sqlText);
+        $sqlText = preg_replace('/^START\s+TRANSACTION;/mi', '', $sqlText);
+        // Konversi PostgreSQL → MySQL agar bisa di-parse
+        $sqlText = $this->convertPostgresToMysql($sqlText);
+
         $parser = new Parser($sqlText);
         $tables = [];
-
-        // Kelompokkan INSERT statements per tabel untuk sample data (tidak dipakai di output, tapi bisa disimpan)
         $inserts = $this->collectInsertStatements($parser);
+
+        // ── Ambil PK dari ALTER TABLE ──────────────────────────────────
+        $alterPks = $this->extractPrimaryKeysFromAlter($sqlText);
 
         foreach ($parser->statements as $stmt) {
             if ($stmt instanceof CreateStatement && $stmt->name !== null) {
-                $tableName = $stmt->name->table;
-                $columns = $this->parseColumnsFromCreate($stmt);
-                $pkColumns = $this->extractPrimaryKeyColumns($stmt, $columns);
+                $tableName   = $stmt->name->table;
+                $columns     = $this->parseColumnsFromCreate($stmt);
+
+                // Gabungkan PK dari kolom + ALTER TABLE
+                $pkFromCol   = array_column(array_filter($columns, fn($c) => $c['pk']), 'name');
+                $pkFromAlter = $alterPks[$tableName] ?? [];
+                $pkColumns   = array_values(array_unique(array_merge($pkFromCol, $pkFromAlter)));
+
+                // Tandai kolom yang masuk PK
+                foreach ($columns as &$col) {
+                    if (in_array($col['name'], $pkColumns)) {
+                        $col['pk']       = true;
+                        $col['not_null'] = true;
+                    }
+                }
+                unset($col);
+
                 $nonPkColumns = array_values(array_diff(
                     array_column($columns, 'name'),
                     $pkColumns
                 ));
-
-                // Tambahkan sample data jika ada (opsional, untuk deteksi multi-value nanti)
-                $sampleData = $inserts[$tableName] ?? [];
 
                 $tables[] = [
                     'name'           => $tableName,
@@ -52,7 +84,7 @@ class SQLParser
                     'pk_columns'     => $pkColumns,
                     'non_pk_columns' => $nonPkColumns,
                     'suggested_fds'  => $this->generateFunctionalDependencies($pkColumns, $nonPkColumns),
-                    'data'           => $sampleData, // tambahan untuk 1NF checker
+                    'data'           => $inserts[$tableName] ?? [],
                 ];
             }
         }
@@ -83,11 +115,10 @@ class SQLParser
                 continue;
             }
 
-            // Kolom biasa (bukan constraint)
             if ($field->name !== null) {
-                $colName = $field->name;
-                $colType = $this->normalizeType($field->type ? $field->type->name : 'unknown');
-                $isPk = $this->isColumnPrimaryKey($field);
+                $colName  = trim($field->name, '"');
+                $colType  = $this->normalizeType($field->type ? $field->type->name : 'unknown');
+                $isPk     = $this->isColumnPrimaryKey($field);
                 $isUnique = $this->isColumnUnique($field);
                 $isNotNull = $this->isColumnNotNull($field) || $isPk;
 
@@ -105,41 +136,56 @@ class SQLParser
     }
 
     /**
-     * Ambil daftar primary key columns (dari kolom dengan flag PK atau dari constraint PRIMARY KEY).
+     * Ekstrak PRIMARY KEY dari ALTER TABLE statements menggunakan regex.
+     * Contoh: ALTER TABLE `users` ADD PRIMARY KEY (`id`);
      *
-     * @param CreateStatement $stmt
-     * @param array $columns Hasil parseColumnsFromCreate
-     * @return string[]
+     * @return array<string, string[]>  [tableName => [col1, col2, ...]]
      */
-    private function extractPrimaryKeyColumns(CreateStatement $stmt, array $columns): array
+    private function extractPrimaryKeysFromAlter(string $sqlText): array
     {
-        $pkColumns = [];
+        $pks = [];
 
-        // Cek dari kolom yang punya flag pk = true
-        foreach ($columns as $col) {
-            if ($col['pk']) {
-                $pkColumns[] = $col['name'];
-            }
+        preg_match_all(
+            '/ALTER\s+TABLE\s+"?`?(\w+)`?"?\s+.*?ADD\s+PRIMARY\s+KEY\s*\(([^)]+)\)/si',
+            $sqlText,
+            $matches,
+            PREG_SET_ORDER
+        );
+
+        foreach ($matches as $match) {
+            $tableName = $match[1];
+            $colList   = $match[2];
+            preg_match_all('/"?`?(\w+)`?"?/', $colList, $colMatches);
+            $pks[$tableName] = $colMatches[1];
         }
 
-        // Cek dari constraint PRIMARY KEY (misal: PRIMARY KEY (id, email))
-        if (isset($stmt->fields) && is_array($stmt->fields)) {
-            foreach ($stmt->fields as $field) {
-                if ($field instanceof CreateDefinition && $field->key !== null && $field->key === 'PRIMARY KEY') {
-                    // $field->references adalah array of Expression
-                    if (isset($field->references) && is_array($field->references)) {
-                        foreach ($field->references as $ref) {
-                            if ($ref instanceof Expression && $ref->column !== null) {
-                                $pkColumns[] = $ref->column;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        return array_values(array_unique($pkColumns));
+        return $pks;
     }
+
+    private function convertPostgresToMysql(string $sql): string
+    {
+        // Kutip ganda nama kolom/tabel → backtick
+        $sql = preg_replace('/"(\w+)"/', '`$1`', $sql);
+
+        // Tipe PostgreSQL → MySQL
+        $sql = preg_replace('/\buuid\b/i',      'varchar(36)', $sql);
+        $sql = preg_replace('/\bserial\b/i',    'int NOT NULL AUTO_INCREMENT', $sql);
+        $sql = preg_replace('/\bboolean\b/i',   'tinyint(1)', $sql);
+        $sql = preg_replace('/\btext\b/i',      'longtext', $sql);
+        $sql = preg_replace('/\bnumeric\b/i',   'decimal', $sql);
+        $sql = preg_replace('/\bsmallint\b/i',  'smallint', $sql);
+        $sql = preg_replace('/\bjson\b/i',      'json', $sql);
+        $sql = preg_replace('/\btimestamp\b/i', 'timestamp', $sql);
+
+        // DEFAULT now() → DEFAULT CURRENT_TIMESTAMP
+        $sql = preg_replace('/DEFAULT\s+now\(\)/i', 'DEFAULT CURRENT_TIMESTAMP', $sql);
+
+        // Hapus ALTER TABLE FOREIGN KEY (tidak diperlukan untuk parsing kolom)
+        $sql = preg_replace('/ALTER\s+TABLE\s+`\w+`\s+ADD\s+FOREIGN\s+KEY[^;]+;/si', '', $sql);
+
+        return $sql;
+    }
+
 
     /**
      * Normalisasi tipe data (hapus parameter, ubah ke lowercase).
@@ -159,7 +205,8 @@ class SQLParser
     {
         if ($field->options && isset($field->options->options)) {
             foreach ($field->options->options as $opt) {
-                if (strtoupper($opt) === 'PRIMARY KEY') {
+                $val = is_array($opt) ? ($opt['name'] ?? '') : (string) $opt;
+                if (strtoupper($val) === 'PRIMARY KEY') {
                     return true;
                 }
             }
@@ -167,14 +214,12 @@ class SQLParser
         return false;
     }
 
-    /**
-     * Cek apakah kolom memiliki UNIQUE flag.
-     */
     private function isColumnUnique(CreateDefinition $field): bool
     {
         if ($field->options && isset($field->options->options)) {
             foreach ($field->options->options as $opt) {
-                if (strtoupper($opt) === 'UNIQUE') {
+                $val = is_array($opt) ? ($opt['name'] ?? '') : (string) $opt;
+                if (strtoupper($val) === 'UNIQUE') {
                     return true;
                 }
             }
@@ -182,14 +227,12 @@ class SQLParser
         return false;
     }
 
-    /**
-     * Cek apakah kolom memiliki NOT NULL flag.
-     */
     private function isColumnNotNull(CreateDefinition $field): bool
     {
         if ($field->options && isset($field->options->options)) {
             foreach ($field->options->options as $opt) {
-                if (strtoupper($opt) === 'NOT NULL') {
+                $val = is_array($opt) ? ($opt['name'] ?? '') : (string) $opt;
+                if (strtoupper($val) === 'NOT NULL') {
                     return true;
                 }
             }
