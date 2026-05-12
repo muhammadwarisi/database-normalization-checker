@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers;
 
-use App\Services\DBMLParser;
+use App\Services\SQLParser;               // <-- Ganti DBMLParser
 use App\Services\FunctionalDependency;
 use App\Services\NormalizationAnalyzer;
 use Illuminate\Http\Request;
@@ -10,7 +10,7 @@ use Illuminate\Http\Request;
 class WebController extends Controller
 {
     public function __construct(
-        private readonly DBMLParser            $parser,
+        private readonly SQLParser            $parser,   // <-- Ganti
         private readonly NormalizationAnalyzer $analyzer,
     ) {}
 
@@ -27,25 +27,26 @@ class WebController extends Controller
     }
 
     // POST /parse
-    // Terima DBML → parse → tampilkan form input FD
+    // Terima SQL (bukan DBML) → parse → tampilkan form input FD
     public function parseTables(Request $request)
     {
         $request->validate([
             'project_name' => ['required', 'string', 'max:255'],
-            'dbml_text'    => ['required', 'string'],
+            'sql_file'     => ['required', 'file', 'mimes:sql,txt', 'max:10240'],
         ]);
 
         try {
-            $tables = $this->parser->parse($request->input('dbml_text'));
+            $sqlContent = $request->file('sql_file')->get();
+            $parsed = $this->parser->parse($sqlContent);
+            $tables = $parsed['tables'];
         } catch (\Exception $e) {
             return back()
                 ->withInput()
-                ->withErrors(['dbml_text' => $e->getMessage()]);
+                ->withErrors(['sql_file' => $e->getMessage()]);
         }
 
         session([
             'project_name' => $request->input('project_name'),
-            'dbml_text'    => $request->input('dbml_text'),
             'tables'       => $tables,
         ]);
 
@@ -57,12 +58,12 @@ class WebController extends Controller
     public function analyze(Request $request)
     {
         $tables      = session('tables');
-        $dbmlText    = session('dbml_text');
+        $sqlText     = session('sql_text');      // <-- bisa dipakai jika butuh, tidak wajib
         $projectName = session('project_name');
 
         if (empty($tables)) {
             return redirect()->route('upload')
-                ->withErrors(['session' => 'Session expired. Please upload DBML again.']);
+                ->withErrors(['session' => 'Session expired. Please upload SQL again.']);
         }
 
         $analysisResult = ['tables' => []];
@@ -96,9 +97,9 @@ class WebController extends Controller
 
             $result = $this->analyzer->normalize(
                 relationName: $tableName,
-                attributes:   $attributes,
+                attributes: $attributes,
                 dependencies: $fds,
-                primaryKey:   $pkColumns,
+                primaryKey: $pkColumns,
             );
 
             $recommendations = [];
@@ -160,7 +161,7 @@ class WebController extends Controller
             'project_name'    => $projectName,
         ]);
 
-        session()->forget(['dbml_text', 'tables']);
+        session()->forget(['sql_text', 'tables']);
 
         return redirect()->route('results');
     }
@@ -171,7 +172,7 @@ class WebController extends Controller
         $analysisResult = session('analysis_result');
         if (empty($analysisResult)) {
             return redirect()->route('upload')
-                ->withErrors(['session' => 'Session expired. Please upload DBML again.']);
+                ->withErrors(['session' => 'Session expired. Please upload SQL again.']);
         }
 
         // Create a temporary object to pass to view with session data
@@ -193,7 +194,7 @@ class WebController extends Controller
         $analysisResult = session('analysis_result');
         if (empty($analysisResult)) {
             return redirect()->route('upload')
-                ->withErrors(['session' => 'Session expired. Please upload DBML again.']);
+                ->withErrors(['session' => 'Session expired. Please upload SQL again.']);
         }
 
         // Create a temporary object to pass to view with session data

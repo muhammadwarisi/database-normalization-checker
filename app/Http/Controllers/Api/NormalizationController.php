@@ -3,33 +3,37 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Services\DBMLParser;
+use App\Services\SQLParser;                      // Ganti DBMLParser
 use App\Services\NormalizationAnalyzer;
 use Illuminate\Http\Request;
 
 class NormalizationController extends Controller
 {
-    private DBMLParser $parser;
+    private SQLParser $parser;                    // Ganti tipe
     private NormalizationAnalyzer $analyzer;
 
-    public function __construct(DBMLParser $parser, NormalizationAnalyzer $analyzer)
+    public function __construct(SQLParser $parser, NormalizationAnalyzer $analyzer)
     {
         $this->parser = $parser;
         $this->analyzer = $analyzer;
     }
 
-    public function uploadDbml(Request $request)
+    /**
+     * Upload SQL dump (CREATE TABLE + optional INSERT) dan analisis normalisasi.
+     */
+    public function uploadSql(Request $request)
     {
         $request->validate([
             'project_name' => 'required|string|max:255',
-            'dbml_text' => 'required|string',
+            'sql_text'     => 'required|string',      // field diganti dari dbml_text
         ]);
 
         try {
-            // Parse DBML
-            $tables = $this->parser->parse($request->dbml_text);
+            // Parse SQL
+            $parsed = $this->parser->parse($request->input('sql_text'));
+            $tables = $parsed['tables'];               // SQLParser mengembalikan array dengan key 'tables'
 
-            // Analyze normalization
+            // Analyze normalization (sama seperti sebelumnya)
             $analysis = $this->analyzer->analyze($tables);
 
             // Count issues
@@ -45,7 +49,6 @@ class NormalizationController extends Controller
                 }
             }
 
-            // Return result directly (no database storage)
             return response()->json([
                 'status' => 'analyzed',
                 'message' => 'Analysis completed. Data is not persisted - refresh to clear results.',
@@ -58,15 +61,24 @@ class NormalizationController extends Controller
             ], 200);
         } catch (\Exception $e) {
             return response()->json([
-                'error' => 'Malformed DBML: ' . $e->getMessage(),
+                'error' => 'Malformed SQL: ' . $e->getMessage(),
             ], 400);
         }
+    }
+
+    // Optional: tetap support endpoint lama dengan nama uploadDbml (deprecated)
+    public function uploadDbml(Request $request)
+    {
+        // Redirect ke method baru, atau beri pesan error
+        return response()->json([
+            'error' => 'This endpoint now expects SQL. Please use POST /api/upload-sql with field "sql_text".',
+        ], 400);
     }
 
     public function getResults(string $projectId)
     {
         return response()->json([
-            'error' => 'Projects are not persisted. Use POST /api/upload-dbml for analysis.',
+            'error' => 'Projects are not persisted. Use POST /api/upload-sql for analysis.',
         ], 404);
     }
 
@@ -78,7 +90,8 @@ class NormalizationController extends Controller
     public function analyzeOnly(Request $request)
     {
         try {
-            $tables = $this->parser->parse($request->input('dbml_text', ''));
+            $parsed = $this->parser->parse($request->input('sql_text', ''));
+            $tables = $parsed['tables'];
             $analysis = $this->analyzer->analyze($tables);
 
             return response()->json([
@@ -96,5 +109,4 @@ class NormalizationController extends Controller
             'error' => 'Projects are not persisted. Visualization is only available during the same session in the web interface.',
         ], 404);
     }
-
 }
