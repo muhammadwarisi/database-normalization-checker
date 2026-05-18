@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers;
 
-use App\Services\SQLParser;               // <-- Ganti DBMLParser
+use App\Services\SQLParser;
 use App\Services\FunctionalDependency;
 use App\Services\NormalizationAnalyzer;
 use Illuminate\Http\Request;
@@ -10,24 +10,20 @@ use Illuminate\Http\Request;
 class WebController extends Controller
 {
     public function __construct(
-        private readonly SQLParser            $parser,   // <-- Ganti
+        private readonly SQLParser             $parser,
         private readonly NormalizationAnalyzer $analyzer,
     ) {}
 
-    // GET /
     public function index()
     {
         return redirect()->route('upload');
     }
 
-    // GET /upload
     public function upload()
     {
         return view('upload');
     }
 
-    // POST /parse
-    // Terima SQL (bukan DBML) → parse → tampilkan form input FD
     public function parseTables(Request $request)
     {
         $request->validate([
@@ -37,12 +33,10 @@ class WebController extends Controller
 
         try {
             $sqlContent = $request->file('sql_file')->get();
-            $parsed = $this->parser->parse($sqlContent);
-            $tables = $parsed['tables'];
+            $parsed     = $this->parser->parse($sqlContent);
+            $tables     = $parsed['tables'];
         } catch (\Exception $e) {
-            return back()
-                ->withInput()
-                ->withErrors(['sql_file' => $e->getMessage()]);
+            return back()->withInput()->withErrors(['sql_file' => $e->getMessage()]);
         }
 
         session([
@@ -53,12 +47,9 @@ class WebController extends Controller
         return view('fd-input', compact('tables'));
     }
 
-    // POST /analyze
-    // Terima FD dari form → analisis → simpan → redirect results
     public function analyze(Request $request)
     {
         $tables      = session('tables');
-        $sqlText     = session('sql_text');      // <-- bisa dipakai jika butuh, tidak wajib
         $projectName = session('project_name');
 
         if (empty($tables)) {
@@ -77,18 +68,23 @@ class WebController extends Controller
             $rawFds     = $request->input("fds.{$tableName}", []);
             $fds        = $this->buildFunctionalDependencies($rawFds);
 
-            // Jika tidak ada FD → skip, anggap tidak bisa dianalisis
+            // Skip jika tidak ada FD
             if (empty($fds)) {
                 $analysisResult['tables'][] = [
                     'name'     => $tableName,
                     'columns'  => $table['columns'],
                     'analysis' => [
-                        '1NF'             => ['status' => true,  'message' => 'Diasumsikan dalam 1NF'],
-                        '2NF'             => ['status' => null,  'message' => 'Tidak ada functional dependencies yang diberikan, dilewati'],
-                        'recommendations' => ['Berikan functional dependencies untuk mengaktifkan analisis 2NF.'],
-                        'candidate_keys'  => [],
-                        'partial_deps'    => [],
-                        'decomposed_relations' => [],
+                        '1NF'                  => ['status' => true,  'message' => 'Diasumsikan dalam 1NF'],
+                        '2NF'                  => ['status' => null,  'message' => 'Tidak ada functional dependencies, dilewati'],
+                        '3NF'                  => ['status' => null,  'message' => 'Tidak ada functional dependencies, dilewati'],
+                        'candidate_keys'       => [],
+                        'minimal_cover'        => [],
+                        'partial_deps'         => [],
+                        'full_deps'            => [],
+                        'transitive_deps'      => [],
+                        'decomposed_2nf'       => [],
+                        'decomposed_3nf'       => [],
+                        'recommendations'      => ['Berikan functional dependencies untuk mengaktifkan analisis 2NF dan 3NF.'],
                     ],
                 ];
                 $issuesCount++;
@@ -102,35 +98,58 @@ class WebController extends Controller
                 primaryKey: $pkColumns,
             );
 
-            $recommendations = [];
-
-            if (!$result->is2NF) {
-                foreach ($result->partialDependencies as $fd) {
-                    $recommendations[] = 'Ketergantungan parsial ditemukan: ' . (string) $fd
-                        . ' — pindahkan ke tabel terpisah dengan kunci (' . implode(', ', $fd->lhs) . ')';
-                }
-            }
-
-            if (!$result->is2NF) {
+            // Hitung issues: melanggar 2NF atau 3NF
+            $hasIssue = !$result->is2NF || !$result->is3NF;
+            if ($hasIssue) {
                 $issuesCount++;
             } else {
                 $passedTables++;
             }
 
-            // Format decomposed relations untuk ditampilkan di view
-            $decomposedRelations = [];
+            // Rekomendasi
+            $recommendations = [];
+            if (!$result->is2NF) {
+                foreach ($result->partialDependencies as $fd) {
+                    $recommendations[] = '[2NF] Ketergantungan parsial: ' . (string) $fd
+                        . ' — pisahkan ke tabel dengan kunci (' . implode(', ', $fd->lhs) . ')';
+                }
+            }
+            if (!$result->is3NF) {
+                foreach ($result->transitiveDependencies as $fd) {
+                    $recommendations[] = '[3NF] Ketergantungan transitif: ' . (string) $fd
+                        . ' — pisahkan ke tabel dengan kunci (' . implode(', ', $fd->lhs) . ')';
+                }
+            }
+
+            // Format relasi hasil dekomposisi 2NF
+            $decomposed2NF = [];
             foreach ($result->relations2NF as $relName => $rel) {
-                $decomposedRelations[] = [
+                $nonPk = array_values(array_diff($rel['attributes'], $rel['primaryKey']));
+                $decomposed2NF[] = [
                     'name'        => $relName,
                     'attributes'  => $rel['attributes'],
                     'primary_key' => $rel['primaryKey'],
+                    'non_pk'      => $nonPk,
+                    'fds'         => array_map(fn($fd) => (string) $fd, $rel['dependencies']),
+                ];
+            }
+
+            // Format relasi hasil dekomposisi 3NF
+            $decomposed3NF = [];
+            foreach ($result->relations3NF as $relName => $rel) {
+                $nonPk = array_values(array_diff($rel['attributes'], $rel['primaryKey']));
+                $decomposed3NF[] = [
+                    'name'        => $relName,
+                    'attributes'  => $rel['attributes'],
+                    'primary_key' => $rel['primaryKey'],
+                    'non_pk'      => $nonPk,
                     'fds'         => array_map(fn($fd) => (string) $fd, $rel['dependencies']),
                 ];
             }
 
             $analysisResult['tables'][] = [
-                'name'     => $tableName,
-                'columns'  => $table['columns'],
+                'name'    => $tableName,
+                'columns' => $table['columns'],
                 'analysis' => [
                     '1NF' => [
                         'status'  => true,
@@ -139,20 +158,27 @@ class WebController extends Controller
                     '2NF' => [
                         'status'  => $result->is2NF,
                         'message' => $result->is2NF
-                            ? 'Tabel berada dalam 2NF'
-                            : 'Tabel melanggar 2NF — ketergantungan parsial ditemukan',
+                            ? 'Tabel memenuhi 2NF'
+                            : 'Tabel melanggar 2NF — terdapat ketergantungan parsial',
                     ],
-                    'candidate_keys'       => $result->candidateKeys,
-                    'partial_deps'         => array_map(fn($fd) => (string) $fd, $result->partialDependencies),
-                    'full_deps'            => array_map(fn($fd) => (string) $fd, $result->fullDependencies),
-                    'minimal_cover'        => array_map(fn($fd) => (string) $fd, $result->minimalCover),
-                    'decomposed_relations' => $decomposedRelations,
-                    'recommendations'      => $recommendations,
+                    '3NF' => [
+                        'status'  => $result->is3NF,
+                        'message' => $result->is3NF
+                            ? 'Tabel memenuhi 3NF'
+                            : 'Tabel melanggar 3NF — terdapat ketergantungan transitif',
+                    ],
+                    'candidate_keys'  => $result->candidateKeys,
+                    'minimal_cover'   => array_map(fn($fd) => (string) $fd, $result->minimalCover),
+                    'partial_deps'    => array_map(fn($fd) => (string) $fd, $result->partialDependencies),
+                    'full_deps'       => array_map(fn($fd) => (string) $fd, $result->fullDependencies),
+                    'transitive_deps' => array_map(fn($fd) => (string) $fd, $result->transitiveDependencies),
+                    'decomposed_2nf'  => $decomposed2NF,
+                    'decomposed_3nf'  => $decomposed3NF,
+                    'recommendations' => $recommendations,
                 ],
             ];
         }
 
-        // Store analysis result in session (no database storage)
         session([
             'analysis_result' => $analysisResult,
             'tables_count'    => count($tables),
@@ -161,12 +187,11 @@ class WebController extends Controller
             'project_name'    => $projectName,
         ]);
 
-        session()->forget(['sql_text', 'tables']);
+        session()->forget(['tables']);
 
         return redirect()->route('results');
     }
 
-    // GET /results
     public function results()
     {
         $analysisResult = session('analysis_result');
@@ -175,20 +200,18 @@ class WebController extends Controller
                 ->withErrors(['session' => 'Session expired. Please upload SQL again.']);
         }
 
-        // Create a temporary object to pass to view with session data
         $project = (object) [
-            'name'              => session('project_name', 'Unnamed Project'),
-            'tables_count'      => session('tables_count', 0),
-            'issues_count'      => session('issues_count', 0),
-            'passed_tables'     => session('passed_tables', 0),
-            'analysis_result'   => $analysisResult,
-            'created_at'        => now(),
+            'name'            => session('project_name', 'Unnamed Project'),
+            'tables_count'    => session('tables_count', 0),
+            'issues_count'    => session('issues_count', 0),
+            'passed_tables'   => session('passed_tables', 0),
+            'analysis_result' => $analysisResult,
+            'created_at'      => now(),
         ];
 
         return view('results', compact('project'));
     }
 
-    // GET /visualize
     public function visualize()
     {
         $analysisResult = session('analysis_result');
@@ -197,111 +220,68 @@ class WebController extends Controller
                 ->withErrors(['session' => 'Session expired. Please upload SQL again.']);
         }
 
-        // Create a temporary object to pass to view with session data
         $project = (object) [
-            'name'              => session('project_name', 'Unnamed Project'),
-            'tables_count'      => session('tables_count', 0),
-            'issues_count'      => session('issues_count', 0),
-            'passed_tables'     => session('passed_tables', 0),
-            'analysis_result'   => $analysisResult,
-            'created_at'        => now(),
+            'name'            => session('project_name', 'Unnamed Project'),
+            'tables_count'    => session('tables_count', 0),
+            'issues_count'    => session('issues_count', 0),
+            'passed_tables'   => session('passed_tables', 0),
+            'analysis_result' => $analysisResult,
+            'created_at'      => now(),
         ];
 
-        // Generate visualization data from session
-        $tables = $analysisResult['tables'] ?? [];
-        $nodes = [];
-        $edges = [];
-        $allTableNames = array_column($tables, 'name');
+        $tables         = $analysisResult['tables'] ?? [];
+        $nodes          = [];
+        $edges          = [];
+        $allTableNames  = array_column($tables, 'name');
 
         foreach ($tables as $table) {
             $nodes[] = [
-                'id' => $table['name'],
-                'label' => $table['name'],
-                'fields' => array_map(fn($col) => $col['name'], $table['columns'])
+                'id'     => $table['name'],
+                'label'  => $table['name'],
+                'fields' => array_map(fn($col) => $col['name'], $table['columns']),
             ];
-
-            // Detect foreign keys (columns ending with _id)
             foreach ($table['columns'] as $col) {
-                $referencedTable = $this->detectReferencedTable($col['name'], $allTableNames);
-                if ($referencedTable) {
-                    $edges[] = [
-                        'from' => $table['name'],
-                        'to' => $referencedTable,
-                        'via' => $col['name'],
-                    ];
+                $ref = $this->detectReferencedTable($col['name'], $allTableNames);
+                if ($ref) {
+                    $edges[] = ['from' => $table['name'], 'to' => $ref, 'via' => $col['name']];
                 }
             }
         }
 
-        $visualizationData = [
-            'nodes' => $nodes,
-            'edges' => $edges,
-        ];
+        $visualizationData = ['nodes' => $nodes, 'edges' => $edges];
 
         return view('visualize', compact('project', 'visualizationData'));
     }
 
     // ----------------------------------------------------------------
-    // Helper
+    // Helpers
     // ----------------------------------------------------------------
+
     private function buildFunctionalDependencies(array $rawFds): array
     {
         $fds = [];
-
         foreach ($rawFds as $item) {
             $lhs = array_values(array_filter(
                 (array) ($item['lhs'] ?? []),
                 fn($v) => trim($v) !== ''
             ));
-
             $rhs = trim($item['rhs'] ?? '');
+            if (empty($lhs) || $rhs === '') continue;
 
-            if (empty($lhs) || $rhs === '') {
-                continue;
-            }
-
-            // Expand jika RHS koma-separated: "a, b" → dua FD terpisah
-            $rhsItems = array_values(array_filter(
-                array_map('trim', explode(',', $rhs)),
-                fn($v) => $v !== ''
-            ));
-
-            foreach ($rhsItems as $rhsAttr) {
+            foreach (array_filter(array_map('trim', explode(',', $rhs))) as $rhsAttr) {
                 $fds[] = new FunctionalDependency($lhs, $rhsAttr);
             }
         }
-
         return $fds;
     }
 
-    private function detectReferencedTable(string $columnName, array $tableNames)
+    private function detectReferencedTable(string $columnName, array $tableNames): ?string
     {
-        if (!str_ends_with($columnName, '_id')) {
-            return null;
-        }
-
+        if (!str_ends_with($columnName, '_id')) return null;
         $base = substr($columnName, 0, -3);
-
-        // 1) Cek exact match
-        if (in_array($base, $tableNames)) {
-            return $base;
+        foreach ([$base, $base . 's', $base . 'ies', rtrim($base, 's')] as $candidate) {
+            if (in_array($candidate, $tableNames)) return $candidate;
         }
-
-        // 2) Cek plural (product → products)
-        if (in_array($base . 's', $tableNames)) {
-            return $base . 's';
-        }
-
-        // 3) Cek plural irregular (category → categories)
-        if (in_array($base . 'ies', $tableNames)) {
-            return $base . 'ies';
-        }
-
-        // 4) Cek singular (users → user)
-        if (in_array(rtrim($base, 's'), $tableNames)) {
-            return rtrim($base, 's');
-        }
-
         return null;
     }
 }

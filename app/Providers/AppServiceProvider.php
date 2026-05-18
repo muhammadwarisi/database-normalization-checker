@@ -21,6 +21,7 @@ class AppServiceProvider extends ServiceProvider
                 new \App\Services\CandidateKeyFinder($closure),
                 new \App\Services\DependencyClassifier($closure),
                 new \App\Services\SecondNFDecomposer($closure),
+                new \App\Services\ThirdNFDecomposer($closure), // ← tambah ini
             );
         });
     }
