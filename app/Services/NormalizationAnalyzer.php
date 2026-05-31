@@ -86,6 +86,15 @@ class NormalizationAnalyzer
         // Step 4: A6 — Dekomposisi ke 3NF
         $result3NF = $this->decomp3NF->decomposeAll($result2NF['relations']);
 
+        // Kumpulkan transitive deps sebagai FunctionalDependency object
+        // langsung dari report SEBELUM di-convert ke string
+        $allTransitiveDeps = [];
+        foreach ($result3NF['report'] as $r) {
+            foreach ($r['transitiveDeps'] as $fd) {
+                $allTransitiveDeps[] = $fd; // ini masih FunctionalDependency object
+            }
+        }
+
         $steps['decompose_3nf'] = [
             'relations' => array_map(
                 fn($r) => [
@@ -98,7 +107,7 @@ class NormalizationAnalyzer
             'report' => array_map(
                 fn($r) => [
                     'is3NF'          => $r['is3NF'],
-                    'transitiveDeps' => $this->fdsToString($r['transitiveDeps']),
+                    'transitiveDeps' => $this->fdsToString($r['transitiveDeps']), // convert ke string hanya untuk steps
                 ],
                 $result3NF['report']
             ),
@@ -118,7 +127,7 @@ class NormalizationAnalyzer
             relations2NF: $result2NF['relations'],
             is3NF: $this->allAre3NF($result3NF['report']),
             relations3NF: $result3NF['allRelations'],
-            transitiveDependencies: $this->collectAllTransitiveDeps($result3NF['report']),
+            transitiveDependencies: $allTransitiveDeps,
             steps: $steps,
         );
     }
@@ -145,7 +154,11 @@ class NormalizationAnalyzer
         $all = [];
         foreach ($report as $r) {
             foreach ($r['transitiveDeps'] as $fd) {
-                $all[] = $fd;
+                // transitiveDeps di report sudah di-convert ke string oleh decomposeAll
+                // kita butuh object aslinya
+                if ($fd instanceof \App\Services\FunctionalDependency) {
+                    $all[] = $fd;
+                }
             }
         }
         return $all;
