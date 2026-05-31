@@ -14,14 +14,15 @@ class AppServiceProvider extends ServiceProvider
         // app/Providers/AppServiceProvider.php → method register()
 
         $this->app->singleton(\App\Services\NormalizationAnalyzer::class, function ($app) {
-            $closure = new \App\Services\ClosureCalculator();
+            $closure   = new \App\Services\ClosureCalculator();
+            $keyFinder = new \App\Services\CandidateKeyFinder($closure); // ← sudah ada
             return new \App\Services\NormalizationAnalyzer(
                 new \App\Services\ExtraneousAttributeRemover($closure),
                 new \App\Services\MinimalCoverCalculator($closure),
-                new \App\Services\CandidateKeyFinder($closure),
+                $keyFinder,
                 new \App\Services\DependencyClassifier($closure),
                 new \App\Services\SecondNFDecomposer($closure),
-                new \App\Services\ThirdNFDecomposer($closure), // ← tambah ini
+                new \App\Services\ThirdNFDecomposer($closure, $keyFinder), // ← tambah $keyFinder
             );
         });
     }
