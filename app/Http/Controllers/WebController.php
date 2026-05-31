@@ -116,8 +116,13 @@ class WebController extends Controller
             }
             if (!$result->is3NF) {
                 foreach ($result->transitiveDependencies as $fd) {
-                    $recommendations[] = '[3NF] Ketergantungan transitif: ' . (string) $fd
-                        . ' — pisahkan ke tabel dengan kunci (' . implode(', ', $fd->lhs) . ')';
+                    if (is_object($fd) && property_exists($fd, 'lhs')) {
+                        $recommendations[] = '[3NF] Ketergantungan transitif: ' . (string) $fd
+                            . ' — pisahkan ke tabel dengan kunci (' . implode(', ', $fd->lhs) . ')';
+                    } else {
+                        // Jika $fd sudah string
+                        $recommendations[] = '[3NF] Ketergantungan transitif: ' . (string) $fd;
+                    }
                 }
             }
 
