@@ -3,23 +3,11 @@
 namespace App\Services;
 
 use PhpMyAdmin\SqlParser\Parser;
-use PhpMyAdmin\SqlParser\Statements\CreateStatement;
-use PhpMyAdmin\SqlParser\Components\CreateDefinition;
-use PhpMyAdmin\SqlParser\Components\Expression;
 
 class SQLParser
 {
     /**
-     * Parse SQL text dan return array tabel dengan format SAMA seperti DBMLParser.
-     *
-     * Output per tabel:
-     * [
-     *   'name'            => 'users',
-     *   'columns'         => [['name' => 'id', 'type' => 'int', 'pk' => true, ...], ...],
-     *   'pk_columns'      => ['id'],
-     *   'non_pk_columns'  => ['name', 'email'],
-     *   'suggested_fds'   => [['lhs' => ['id'], 'rhs' => 'name'], ...],
-     * ]
+     * Parse SQL text dan return array tabel.
      *
      * @param string $sqlText Isi file .sql (CREATE TABLE + optional INSERT)
      * @return array
@@ -27,6 +15,7 @@ class SQLParser
      */
     public function parse(string $sqlText): array
     {
+        // Hapus BOM
         $sqlText = preg_replace('/^\xEF\xBB\xBF/', '', $sqlText);
 
         // Validasi format yang didukung
@@ -39,54 +28,24 @@ class SQLParser
         if (!preg_match('/CREATE\s+TABLE/i', $sqlText)) {
             throw new \Exception('No CREATE TABLE statements found. Please make sure your SQL file contains table definitions.');
         }
+
         // Preprocessing
-        $sqlText = preg_replace('/^\xEF\xBB\xBF/', '', $sqlText);
-        $sqlText = preg_replace('/^\/\*.*?\*\/;?\s*/ms', '', $sqlText);
-        $sqlText = preg_replace('/^SET\s+\w.*?;/mi', '', $sqlText);
-        $sqlText = preg_replace('/^START\s+TRANSACTION;/mi', '', $sqlText);
-        // Konversi PostgreSQL → MySQL agar bisa di-parse
+        $sqlText = $this->preprocessSql($sqlText);
+
+        // Konversi PostgreSQL ke MySQL
         $sqlText = $this->convertPostgresToMysql($sqlText);
 
+        // ⭐ EKSTRAK CREATE TABLE DENGAN BALANCED PARENTHESES
+        $tables = $this->extractTablesBalanced($sqlText);
+
+        // Ambil INSERT statements untuk sample data
         $parser = new Parser($sqlText);
-        $tables = [];
         $inserts = $this->collectInsertStatements($parser);
 
-        // ── Ambil PK dari ALTER TABLE ──────────────────────────────────
-        $alterPks = $this->extractPrimaryKeysFromAlter($sqlText);
-
-        foreach ($parser->statements as $stmt) {
-            if ($stmt instanceof CreateStatement && $stmt->name !== null) {
-                $tableName   = $stmt->name->table;
-                $columns     = $this->parseColumnsFromCreate($stmt);
-
-                // Gabungkan PK dari kolom + ALTER TABLE
-                $pkFromCol   = array_column(array_filter($columns, fn($c) => $c['pk']), 'name');
-                $pkFromAlter = $alterPks[$tableName] ?? [];
-                $pkColumns   = array_values(array_unique(array_merge($pkFromCol, $pkFromAlter)));
-
-                // Tandai kolom yang masuk PK
-                foreach ($columns as &$col) {
-                    if (in_array($col['name'], $pkColumns)) {
-                        $col['pk']       = true;
-                        $col['not_null'] = true;
-                    }
-                }
-                unset($col);
-
-                $nonPkColumns = array_values(array_diff(
-                    array_column($columns, 'name'),
-                    $pkColumns
-                ));
-
-                $tables[] = [
-                    'name'           => $tableName,
-                    'columns'        => $columns,
-                    'pk_columns'     => $pkColumns,
-                    'non_pk_columns' => $nonPkColumns,
-                    'suggested_fds'  => $this->generateFunctionalDependencies($pkColumns, $nonPkColumns),
-                    'data'           => $inserts[$tableName] ?? [],
-                ];
-            }
+        // Gabungkan data sample dengan tabel hasil regex
+        foreach ($tables as &$table) {
+            $tableName = $table['name'];
+            $table['data'] = $inserts[$tableName] ?? [];
         }
 
         if (empty($tables)) {
@@ -97,35 +56,187 @@ class SQLParser
     }
 
     /**
-     * Ekstrak definisi kolom dari CREATE TABLE statement.
+     * Ekstrak CREATE TABLE dengan balanced parentheses matching
+     * Method ini membaca karakter per karakter untuk menemukan kurung buka dan tutup
      *
-     * @param CreateStatement $stmt
+     * @param string $sqlText
      * @return array
      */
-    private function parseColumnsFromCreate(CreateStatement $stmt): array
+    private function extractTablesBalanced(string $sqlText): array
+    {
+        $tables = [];
+
+        // ⭐ TAMBAH INI: Extract PRIMARY KEYS dari ALTER TABLE
+        $primaryKeysFromAlter = $this->extractPrimaryKeysFromAlter($sqlText);
+
+        // Cari semua posisi "CREATE TABLE"
+        $pattern = '/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?(\w+)`?\s*\(/i';
+        preg_match_all($pattern, $sqlText, $matches, PREG_OFFSET_CAPTURE);
+
+        foreach ($matches[0] as $idx => $match) {
+            $tableName = $matches[1][$idx][0];
+            $startPos = $match[1];
+
+            // Cari kurung buka '(' setelah CREATE TABLE
+            $openPos = strpos($sqlText, '(', $startPos);
+            if ($openPos === false) continue;
+
+            // Cari kurung tutup yang seimbang
+            $closePos = $this->findMatchingClosingBracket($sqlText, $openPos);
+            if ($closePos === false) continue;
+
+            // Extract body antara kurung
+            $tableBody = substr($sqlText, $openPos + 1, $closePos - $openPos - 1);
+
+            // Parse kolom dari body
+            $columns = $this->parseColumnsFromBody($tableBody);
+
+            // Ekstrak PRIMARY KEY dari CREATE TABLE (inline/constraint)
+            $pkFromCreate = $this->extractPrimaryKeyFromBody($tableBody);
+
+            // ⭐ AMBIL PRIMARY KEY DARI ALTER TABLE
+            $pkFromAlter = $primaryKeysFromAlter[$tableName] ?? [];
+
+            // ⭐ GABUNGKAN SEMUA SUMBER PK
+            $pkColumns = array_values(array_unique(array_merge($pkFromCreate, $pkFromAlter)));
+
+            // Tandai kolom yang termasuk PK
+            foreach ($columns as &$col) {
+                if (in_array($col['name'], $pkColumns)) {
+                    $col['pk'] = true;
+                    $col['not_null'] = true;
+                }
+            }
+            unset($col);
+
+            // Jika tidak ada PK sama sekali, cek apakah ada kolom bernama 'id'
+            if (empty($pkColumns)) {
+                foreach ($columns as &$col) {
+                    if ($col['name'] === 'id' && !$col['pk']) {
+                        $pkColumns = ['id'];
+                        $col['pk'] = true;
+                        $col['not_null'] = true;
+                        break;
+                    }
+                }
+                unset($col);
+            }
+
+            $nonPkColumns = array_values(array_diff(
+                array_column($columns, 'name'),
+                $pkColumns
+            ));
+
+            $tables[] = [
+                'name'           => $tableName,
+                'columns'        => $columns,
+                'pk_columns'     => $pkColumns,
+                'non_pk_columns' => $nonPkColumns,
+                'suggested_fds'  => $this->generateFunctionalDependencies($pkColumns, $nonPkColumns),
+                'data'           => [],
+            ];
+        }
+
+        return $tables;
+    }
+
+    /**
+     * Mencari posisi kurung tutup yang seimbang dengan kurung buka di posisi $openPos
+     *
+     * @param string $sqlText
+     * @param int $openPos
+     * @return int|false
+     */
+    private function findMatchingClosingBracket(string $sqlText, int $openPos): int|false
+    {
+        $depth = 1;
+        $len = strlen($sqlText);
+
+        for ($i = $openPos + 1; $i < $len; $i++) {
+            $char = $sqlText[$i];
+            if ($char === '(') {
+                $depth++;
+            } elseif ($char === ')') {
+                $depth--;
+                if ($depth === 0) {
+                    return $i;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Preprocessing SQL: hapus komentar dan SET statements
+     */
+    private function preprocessSql(string $sqlText): string
+    {
+        // Hapus komentar block /* ... */
+        $sqlText = preg_replace('/\/\*.*?\*\//s', '', $sqlText);
+
+        // Hapus komentar satu baris --
+        $sqlText = preg_replace('/--[^\n]*\n/', "\n", $sqlText);
+
+        // Hapus komentar satu baris #
+        $sqlText = preg_replace('/^#[^\n]*\n/m', "\n", $sqlText);
+
+        // Hapus SET statements
+        $sqlText = preg_replace('/^SET\s+\w.*?;$/mi', '', $sqlText);
+
+        // Hapus START TRANSACTION
+        $sqlText = preg_replace('/^START\s+TRANSACTION;$/mi', '', $sqlText);
+
+        // Hapus COMMIT
+        $sqlText = preg_replace('/^COMMIT;$/mi', '', $sqlText);
+
+        return $sqlText;
+    }
+
+    /**
+     * Parse kolom dari body CREATE TABLE.
+     *
+     * @param string $tableBody
+     * @return array
+     */
+    private function parseColumnsFromBody(string $tableBody): array
     {
         $columns = [];
 
-        if (!isset($stmt->fields) || !is_array($stmt->fields)) {
-            return $columns;
-        }
+        // Split berdasarkan baris
+        $lines = explode("\n", $tableBody);
 
-        foreach ($stmt->fields as $field) {
-            if (!$field instanceof CreateDefinition) {
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if (empty($line)) continue;
+
+            // Skip constraint lines
+            if (preg_match('/^(PRIMARY|FOREIGN|KEY|INDEX|CONSTRAINT|UNIQUE)\s+/i', $line)) {
                 continue;
             }
 
-            if ($field->name !== null) {
-                $colName  = trim($field->name, '"');
-                $colType  = $this->normalizeType($field->type ? $field->type->name : 'unknown');
-                $isPk     = $this->isColumnPrimaryKey($field);
-                $isUnique = $this->isColumnUnique($field);
-                $isNotNull = $this->isColumnNotNull($field) || $isPk;
+            // Skip baris PRIMARY KEY
+            if (preg_match('/^PRIMARY\s+KEY/i', $line)) {
+                continue;
+            }
+
+            // Hapus trailing comma
+            $line = rtrim($line, ',');
+
+            // Parse: `column_name` type [options]
+            if (preg_match('/^`?([a-zA-Z0-9_]+)`?\s+([a-zA-Z][a-zA-Z0-9_()]*)/', $line, $colMatch)) {
+                $colName = $colMatch[1];
+                $colTypeRaw = $colMatch[2];
+                $colType = $this->normalizeType($colTypeRaw);
+
+                $isPkInline = stripos($line, 'PRIMARY KEY') !== false;
+                $isNotNull = stripos($line, 'NOT NULL') !== false || $isPkInline;
+                $isUnique = stripos($line, 'UNIQUE') !== false;
 
                 $columns[] = [
                     'name'     => $colName,
                     'type'     => $colType,
-                    'pk'       => $isPk,
+                    'pk'       => $isPkInline,
                     'unique'   => $isUnique,
                     'not_null' => $isNotNull,
                 ];
@@ -136,115 +247,62 @@ class SQLParser
     }
 
     /**
-     * Ekstrak PRIMARY KEY dari ALTER TABLE statements menggunakan regex.
-     * Contoh: ALTER TABLE `users` ADD PRIMARY KEY (`id`);
+     * Ekstrak PRIMARY KEY dari body CREATE TABLE.
      *
-     * @return array<string, string[]>  [tableName => [col1, col2, ...]]
+     * @param string $tableBody
+     * @return string[]
      */
-    private function extractPrimaryKeysFromAlter(string $sqlText): array
+    private function extractPrimaryKeyFromBody(string $tableBody): array
     {
-        $pks = [];
+        $pkColumns = [];
 
-        preg_match_all(
-            '/ALTER\s+TABLE\s+"?`?(\w+)`?"?\s+.*?ADD\s+PRIMARY\s+KEY\s*\(([^)]+)\)/si',
-            $sqlText,
-            $matches,
-            PREG_SET_ORDER
-        );
+        // Gabungkan semua baris jadi satu untuk memudahkan regex
+        $bodyOneLine = preg_replace('/\s+/', ' ', $tableBody);
 
-        foreach ($matches as $match) {
-            $tableName = $match[1];
-            $colList   = $match[2];
-            preg_match_all('/"?`?(\w+)`?"?/', $colList, $colMatches);
-            $pks[$tableName] = $colMatches[1];
+        // Pattern untuk PRIMARY KEY ( `col1`, `col2` )
+        if (preg_match('/PRIMARY\s+KEY\s*\(([^)]+)\)/i', $bodyOneLine, $matches)) {
+            $colList = $matches[1];
+            preg_match_all('/`?([a-zA-Z0-9_]+)`?/', $colList, $colMatches);
+            $pkColumns = $colMatches[1];
         }
 
-        return $pks;
+        return array_values(array_unique($pkColumns));
     }
 
+    /**
+     * Konversi PostgreSQL ke MySQL
+     */
     private function convertPostgresToMysql(string $sql): string
     {
-        // Kutip ganda nama kolom/tabel → backtick
         $sql = preg_replace('/"(\w+)"/', '`$1`', $sql);
-
-        // Tipe PostgreSQL → MySQL
-        $sql = preg_replace('/\buuid\b/i',      'varchar(36)', $sql);
-        $sql = preg_replace('/\bserial\b/i',    'int NOT NULL AUTO_INCREMENT', $sql);
-        $sql = preg_replace('/\bboolean\b/i',   'tinyint(1)', $sql);
-        $sql = preg_replace('/\btext\b/i',      'longtext', $sql);
-        $sql = preg_replace('/\bnumeric\b/i',   'decimal', $sql);
-        $sql = preg_replace('/\bsmallint\b/i',  'smallint', $sql);
-        $sql = preg_replace('/\bjson\b/i',      'json', $sql);
+        $sql = preg_replace('/\buuid\b/i', 'varchar(36)', $sql);
+        $sql = preg_replace('/\bserial\b/i', 'int NOT NULL AUTO_INCREMENT', $sql);
+        $sql = preg_replace('/\bbigserial\b/i', 'bigint NOT NULL AUTO_INCREMENT', $sql);
+        $sql = preg_replace('/\bboolean\b/i', 'tinyint(1)', $sql);
+        $sql = preg_replace('/\btext\b/i', 'longtext', $sql);
+        $sql = preg_replace('/\bnumeric\b/i', 'decimal', $sql);
+        $sql = preg_replace('/\bsmallint\b/i', 'smallint', $sql);
+        $sql = preg_replace('/\bjson\b/i', 'json', $sql);
         $sql = preg_replace('/\btimestamp\b/i', 'timestamp', $sql);
-
-        // DEFAULT now() → DEFAULT CURRENT_TIMESTAMP
+        $sql = preg_replace('/\benum\([^)]+\)/i', 'varchar(255)', $sql);
         $sql = preg_replace('/DEFAULT\s+now\(\)/i', 'DEFAULT CURRENT_TIMESTAMP', $sql);
-
-        // Hapus ALTER TABLE FOREIGN KEY (tidak diperlukan untuk parsing kolom)
-        $sql = preg_replace('/ALTER\s+TABLE\s+`\w+`\s+ADD\s+FOREIGN\s+KEY[^;]+;/si', '', $sql);
 
         return $sql;
     }
 
-
     /**
-     * Normalisasi tipe data (hapus parameter, ubah ke lowercase).
+     * Normalisasi tipe data
      */
-    private function normalizeType($type): string
+    private function normalizeType(string $type): string
     {
         if (!$type) return 'unknown';
-        // Hilangkan angka dalam kurung (varchar(255) -> varchar)
         $cleaned = preg_replace('/\(\d+\)/', '', $type);
+        $cleaned = preg_replace('/\s+unsigned/i', '', $cleaned);
         return strtolower(trim($cleaned));
     }
 
     /**
-     * Cek apakah kolom memiliki PRIMARY KEY flag.
-     */
-    private function isColumnPrimaryKey(CreateDefinition $field): bool
-    {
-        if ($field->options && isset($field->options->options)) {
-            foreach ($field->options->options as $opt) {
-                $val = is_array($opt) ? ($opt['name'] ?? '') : (string) $opt;
-                if (strtoupper($val) === 'PRIMARY KEY') {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private function isColumnUnique(CreateDefinition $field): bool
-    {
-        if ($field->options && isset($field->options->options)) {
-            foreach ($field->options->options as $opt) {
-                $val = is_array($opt) ? ($opt['name'] ?? '') : (string) $opt;
-                if (strtoupper($val) === 'UNIQUE') {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private function isColumnNotNull(CreateDefinition $field): bool
-    {
-        if ($field->options && isset($field->options->options)) {
-            foreach ($field->options->options as $opt) {
-                $val = is_array($opt) ? ($opt['name'] ?? '') : (string) $opt;
-                if (strtoupper($val) === 'NOT NULL') {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Kumpulkan INSERT statements per tabel untuk sample data (maksimal 20 baris per tabel).
-     *
-     * @param Parser $parser
-     * @return array<string, array>  [tableName => [row1, row2, ...]]
+     * Kumpulkan INSERT statements per tabel
      */
     private function collectInsertStatements(Parser $parser): array
     {
@@ -252,13 +310,16 @@ class SQLParser
 
         foreach ($parser->statements as $stmt) {
             if ($stmt instanceof \PhpMyAdmin\SqlParser\Statements\InsertStatement) {
+                if ($stmt->into === null || $stmt->into->dest === null) {
+                    continue;
+                }
+
                 $tableName = $stmt->into->dest->table;
                 if (!isset($inserts[$tableName])) {
                     $inserts[$tableName] = [];
                 }
-                if (count($inserts[$tableName]) >= 20) continue; // batasi sample
+                if (count($inserts[$tableName]) >= 20) continue;
 
-                // Ambil nilai VALUES
                 if (isset($stmt->values) && is_array($stmt->values)) {
                     foreach ($stmt->values as $row) {
                         $rowData = [];
@@ -279,18 +340,13 @@ class SQLParser
     }
 
     // ============================================================
-    //  HEURISTIK FD (sama persis dengan DBMLParser)
+    //  HEURISTIK FD
     // ============================================================
 
-    /**
-     * Generate FD otomatis menggunakan heuristik prefix.
-     * Sama dengan DBMLParser::generateFunctionalDependencies
-     */
     private function generateFunctionalDependencies(array $pkColumns, array $nonPkColumns): array
     {
         $fds = [];
 
-        // PK tunggal
         if (count($pkColumns) <= 1) {
             foreach ($nonPkColumns as $col) {
                 $fds[] = ['lhs' => $pkColumns, 'rhs' => $col];
@@ -298,7 +354,6 @@ class SQLParser
             return $fds;
         }
 
-        // PK composite: bangun prefix map
         $prefixMap = [];
         foreach ($pkColumns as $pk) {
             $prefix = $this->extractPrefix($pk);
@@ -336,5 +391,36 @@ class SQLParser
             }
         }
         return null;
+    }
+
+    /**
+     * Ekstrak PRIMARY KEY dari ALTER TABLE statements
+     * 
+     * Contoh: 
+     *   ALTER TABLE `cache` ADD PRIMARY KEY (`key`);
+     *   ALTER TABLE `users` ADD PRIMARY KEY (`id`);
+     *
+     * @param string $sqlText
+     * @return array<string, string[]> [tableName => [col1, col2, ...]]
+     */
+    private function extractPrimaryKeysFromAlter(string $sqlText): array
+    {
+        $primaryKeys = [];
+
+        // Pattern untuk ALTER TABLE ... ADD PRIMARY KEY (...)
+        $pattern = '/ALTER\s+TABLE\s+`?(\w+)`?\s+ADD\s+PRIMARY\s+KEY\s*\(([^)]+)\)/i';
+
+        preg_match_all($pattern, $sqlText, $matches, PREG_SET_ORDER);
+
+        foreach ($matches as $match) {
+            $tableName = $match[1];
+            $columnList = $match[2];
+
+            // Extract column names (supports backtick and plain names)
+            preg_match_all('/`?([a-zA-Z0-9_]+)`?/', $columnList, $colMatches);
+            $primaryKeys[$tableName] = $colMatches[1];
+        }
+
+        return $primaryKeys;
     }
 }
