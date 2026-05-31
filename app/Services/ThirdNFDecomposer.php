@@ -12,10 +12,11 @@ namespace App\Services;
  *   Input: R (1NF relation) dan Ft (transitive dependencies)
  *   Output: set of relations in 3NF
  */
-class ThirdNormalFormService
+class ThirdNFDecomposer
 {
     public function __construct(
-        private readonly ClosureCalculator $closureCalc
+        private readonly ClosureCalculator  $closureCalc,
+        private readonly CandidateKeyFinder $keyFinder,  // ← tambah ini
     ) {}
 
     /**
@@ -135,27 +136,28 @@ class ThirdNormalFormService
      *     report: array
      * }
      */
+    // Ubah decomposeAll — ganti findCandidateKeys internal dengan keyFinder
     public function decomposeAll(array $relations2NF): array
     {
         $allRelations = [];
-        $report = [];
+        $report       = [];
 
         foreach ($relations2NF as $relName => $relData) {
             $attrs = $relData['attributes'];
-            $deps = $relData['dependencies'];
-            $pk = $relData['primaryKey'];
+            $deps  = $relData['dependencies'];
+            $pk    = $relData['primaryKey'];
 
-            // Cari candidate keys untuk relasi ini (opsional, bisa di-pass dari luar)
-            $candidateKeys = $this->findCandidateKeys($attrs, $deps);
-            if (empty($candidateKeys)) {
-                $candidateKeys = [$pk];
+            // Gunakan CandidateKeyFinder yang sudah teruji, bukan internal
+            $cks = $this->keyFinder->findAll($attrs, $deps);
+            if (empty($cks)) {
+                $cks = [$pk];
             }
 
-            $result = $this->decompose($relName, $attrs, $deps, $candidateKeys, $pk);
+            $result = $this->decompose($relName, $attrs, $deps, $cks, $pk);
 
             $report[$relName] = [
-                'is3NF' => $result['is3NF'],
-                'transitiveDeps' => array_map(fn($fd) => (string)$fd, $result['transitiveDeps']),
+                'is3NF'          => $result['is3NF'],
+                'transitiveDeps' => $result['transitiveDeps'],
             ];
 
             foreach ($result['relations'] as $name => $data) {
@@ -165,7 +167,7 @@ class ThirdNormalFormService
 
         return [
             'allRelations' => $allRelations,
-            'report' => $report,
+            'report'       => $report,
         ];
     }
 
@@ -224,7 +226,9 @@ class ThirdNormalFormService
         $lhsSet = [];
         $rhsSet = [];
         foreach ($deps as $fd) {
-            foreach ($fd->lhs as $a) { $lhsSet[$a] = true; }
+            foreach ($fd->lhs as $a) {
+                $lhsSet[$a] = true;
+            }
             $rhsSet[$fd->rhs] = true;
         }
 
