@@ -37,45 +37,36 @@ class MinimalCoverCalculator
      */
     public function compute(array $dependencies): array
     {
-        $Fm = $dependencies;
+        $Fm = array_values($dependencies);
+        $total = count($Fm);
 
-        // Iterasi setiap FD sebagai "anchor" X→A
-        foreach ($Fm as $anchorIdx => $anchor) {
-            // Cari FD lain dengan RHS yang sama
-            foreach ($Fm as $candidateIdx => $candidate) {
-                // Lewati jika sama FD atau RHS berbeda
-                if ($anchorIdx === $candidateIdx) {
-                    continue;
+        for ($i = 0; $i < count($Fm); $i++) {
+            $anchor = $Fm[$i];
+            // while loop: cari selama masih ada Y→A yang redundan terhadap anchor ini
+            while (true) {
+                $found = false;
+                for ($j = 0; $j < count($Fm); $j++) {
+                    if ($i === $j) continue;
+                    $candidate = $Fm[$j];
+                    if ($candidate->rhs !== $anchor->rhs) continue;
+
+                    // G = Fm tanpa candidate
+                    $G = $this->removeFdAtIndex($Fm, $j);
+                    $closureY = $this->closureCalc->compute($candidate->lhs, $G);
+
+                    // Cek subset menggunakan array_diff (sama seperti kode Anda)
+                    $isSubset = count(array_diff($anchor->lhs, $closureY)) === 0;
+
+                    if ($isSubset) {
+                        // Hapus candidate
+                        array_splice($Fm, $j, 1);
+                        // Jika indeks j lebih kecil dari i, maka anchor bergeser ke kiri
+                        if ($j < $i) $i--;
+                        $found = true;
+                        break; // keluar dari for, ulangi while dengan Fm baru
+                    }
                 }
-                if ($candidate->rhs !== $anchor->rhs) {
-                    continue;
-                }
-
-                // G = Fm - (candidate)
-                $G = $this->removeFdAtIndex($Fm, $candidateIdx);
-
-                // Cek apakah X (lhs anchor) ⊆ closure(Y, G)
-                // di mana Y adalah lhs candidate
-                $closureOfCandidate = $this->closureCalc->compute(
-                    $candidate->lhs,
-                    $G
-                );
-
-                $anchorLhsSubsetOfClosure = count(
-                    array_diff($anchor->lhs, $closureOfCandidate)
-                ) === 0;
-
-                if ($anchorLhsSubsetOfClosure) {
-                    // candidate adalah redundan → hapus dari Fm
-                    $Fm = $G;
-
-                    // Re-index agar konsisten
-                    $Fm = array_values($Fm);
-
-                    // Karena Fm berubah, mulai ulang loop luar
-                    // (break inner dan reset outer via goto/continue)
-                    continue 2;
-                }
+                if (!$found) break; // tidak ada lagi yang redundan untuk anchor ini
             }
         }
 
