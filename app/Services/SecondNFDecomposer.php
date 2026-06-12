@@ -106,7 +106,7 @@ class SecondNFDecomposer
             $relationName = $this->makeRelationName($Y);
             $R2NF[$relationName] = [
                 'attributes'   => $ryAttributes,
-                'primaryKey'   => sort_copy($Y),
+                'primaryKey'   => $this->sortCopy($Y),
                 'dependencies' => $ryDeps,
             ];
 
@@ -237,10 +237,16 @@ class SecondNFDecomposer
     {
         foreach ($candidateKeys as $ck) {
             if (count(array_diff($ck, $attributes)) === 0) {
-                return sort_copy($ck);
+                return $this->sortCopy($ck);
             }
         }
         return $attributes; // fallback: semua atribut
+    }
+
+    private function sortCopy(array $arr): array
+    {
+        sort($arr);
+        return $arr;
     }
 
     private function makeRelationName(array $lhs): string
