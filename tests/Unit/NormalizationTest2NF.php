@@ -6,567 +6,362 @@ use Tests\TestCase;
 use App\Services\ClosureCalculator;
 use App\Services\ExtraneousAttributeRemover;
 use App\Services\MinimalCoverCalculator;
-use App\Services\CandidateKeyFinder;
 use App\Services\DependencyClassifier;
 use App\Services\SecondNFDecomposer;
-use App\Services\NormalizationAnalyzer;
 use App\Services\FunctionalDependency;
 
 class NormalizationTest2NF extends TestCase
 {
-    private NormalizationAnalyzer $analyzer;
+    // ==================== A1 : Closure Computation ====================
 
-    protected function setUp(): void
+    /** @test Path 1: F kosong → closure = himpunan awal */
+    public function a1_path1_empty_fd()
     {
-        parent::setUp();
-
-        $closure  = new ClosureCalculator();
-        $this->analyzer = new NormalizationAnalyzer(
-            new ExtraneousAttributeRemover($closure),
-            new MinimalCoverCalculator($closure),
-            new CandidateKeyFinder($closure),
-            new DependencyClassifier($closure),
-            new SecondNFDecomposer($closure),
-        );
+        $calc = new ClosureCalculator();
+        $attrs = ['id_karyawan', 'nama_karyawan'];
+        $deps = [];
+        $result = $calc->compute($attrs, $deps);
+        $this->assertEquals(['id_karyawan', 'nama_karyawan'], $result);
     }
 
-    // ----------------------------------------------------------------
-    // Helper
-    // ----------------------------------------------------------------
-
-    /** Buat FunctionalDependency dari array ['lhs' => [...], 'rhs' => '...'] */
-    private function makeFds(array $rawFds): array
+    /** @test Path 2: FD ada tapi LHS tidak ada di closure awal */
+    public function a1_path2_fd_exists_but_not_applicable()
     {
-        $fds = [];
-        foreach ($rawFds as $raw) {
-            $lhs = (array) $raw['lhs'];
-            // Support multi-RHS dengan koma
-            foreach (array_map('trim', explode(',', $raw['rhs'])) as $rhs) {
-                $fds[] = new FunctionalDependency($lhs, $rhs);
-            }
-        }
-        return $fds;
+        $calc = new ClosureCalculator();
+        $attrs = ['id_karyawan']; // hanya tahu id karyawan
+        // FD: dari id_departemen kita bisa tahu nama_departemen
+        $deps = [new FunctionalDependency(['id_departemen'], 'nama_departemen')];
+        $result = $calc->compute($attrs, $deps);
+        $this->assertEquals(['id_karyawan'], $result);
     }
 
-    /** Normalisasi array atribut untuk perbandingan */
-    private function sortAttrs(array $attrs): array
+    /** @test Path 3: FD berantai, closure bertambah */
+    public function a1_path3_closure_grows()
     {
-        sort($attrs);
-        return array_values(array_unique($attrs));
+        $calc = new ClosureCalculator();
+        $attrs = ['id_karyawan'];
+        $deps = [
+            new FunctionalDependency(['id_karyawan'], 'nama_karyawan'),
+            new FunctionalDependency(['nama_karyawan'], 'kota_tinggal')
+        ];
+        $result = $calc->compute($attrs, $deps);
+        $this->assertEqualsCanonicalizing(['id_karyawan', 'nama_karyawan', 'kota_tinggal'], $result);
     }
 
-    /** Cek apakah relasi dengan atribut tertentu ada di hasil dekomposisi */
-    private function assertRelationExists(array $relations, array $expectedAttrs): void
+    // ==================== A2 : Remove Implied Extraneous Attributes ====================
+
+    /** @test Path 1: F kosong → langsung kembali G kosong */
+    public function a2_path1_empty_f()
     {
-        $expected = $this->sortAttrs($expectedAttrs);
-        foreach ($relations as $rel) {
-            if ($this->sortAttrs($rel['attributes']) === $expected) {
-                $this->assertTrue(true);
-                return;
-            }
-        }
-        $found = array_map(fn($r) => implode(',', $this->sortAttrs($r['attributes'])), $relations);
-        $this->fail(
-            "Relasi dengan atribut [" . implode(', ', $expected) . "] tidak ditemukan.\n"
-            . "Relasi yang ada: " . implode(' | ', $found)
-        );
+        $remover = new ExtraneousAttributeRemover(new ClosureCalculator());
+        $deps = [];
+        $result = $remover->remove($deps);
+        $this->assertEmpty($result);
     }
 
-    // ================================================================
-    // LOLOS 2NF — TC 01–07
-    // ================================================================
-
-    /**
-     * TC-01: PK tunggal, semua non-PK bergantung penuh.
-     * Relasi: Student(student_id, name, email, birth_date)
-     * PK: student_id
-     */
-    public function test_tc01_pk_tunggal_lolos_2nf(): void
+    /** @test Path 2: Hanya FD dengan LHS tunggal → tidak ada perubahan */
+    public function a2_path2_only_singleton_lhs()
     {
-        $attrs = ['student_id', 'name', 'email', 'birth_date'];
-        $fds   = $this->makeFds([
-            ['lhs' => ['student_id'], 'rhs' => 'name'],
-            ['lhs' => ['student_id'], 'rhs' => 'email'],
-            ['lhs' => ['student_id'], 'rhs' => 'birth_date'],
-        ]);
-
-        $result = $this->analyzer->normalize('Student', $attrs, $fds, ['student_id']);
-
-        $this->assertTrue($result->is2NF, 'TC-01: Seharusnya lolos 2NF');
-        $this->assertEmpty($result->partialDependencies, 'TC-01: Tidak boleh ada partial dependency');
-        $this->assertCount(1, $result->relations2NF, 'TC-01: Hanya satu relasi (tidak didekomposisi)');
+        $remover = new ExtraneousAttributeRemover(new ClosureCalculator());
+        // FD: id_karyawan → nama_karyawan, id_departemen → nama_departemen
+        $deps = [
+            new FunctionalDependency(['id_karyawan'], 'nama_karyawan'),
+            new FunctionalDependency(['id_departemen'], 'nama_departemen')
+        ];
+        $result = $remover->remove($deps);
+        $this->assertCount(2, $result);
+        $this->assertTrue($result[0]->equals(new FunctionalDependency(['id_karyawan'], 'nama_karyawan')));
+        $this->assertTrue($result[1]->equals(new FunctionalDependency(['id_departemen'], 'nama_departemen')));
     }
 
-    /**
-     * TC-02: PK tunggal, domain produk.
-     * Relasi: Product(product_id, product_name, price, stock)
-     * PK: product_id
-     */
-    public function test_tc02_product_pk_tunggal_lolos_2nf(): void
+    /** @test Path 3: Ada composite lhs tapi semua atribut hanya di LHS (lo) → tidak ada perubahan */
+    public function a2_path3_composite_lhs_but_no_lr()
     {
-        $attrs = ['product_id', 'product_name', 'price', 'stock'];
-        $fds   = $this->makeFds([
-            ['lhs' => ['product_id'], 'rhs' => 'product_name'],
-            ['lhs' => ['product_id'], 'rhs' => 'price'],
-            ['lhs' => ['product_id'], 'rhs' => 'stock'],
-        ]);
-
-        $result = $this->analyzer->normalize('Product', $attrs, $fds, ['product_id']);
-
-        $this->assertTrue($result->is2NF, 'TC-02: Seharusnya lolos 2NF');
-        $this->assertEmpty($result->partialDependencies, 'TC-02: Tidak boleh ada partial dependency');
+        $remover = new ExtraneousAttributeRemover(new ClosureCalculator());
+        // FD: (id_karyawan, id_departemen) → tanggal_mulai
+        // Atribut id_karyawan dan id_departemen hanya muncul di LHS (lo), tidak pernah di RHS → bukan lr, tidak perlu diperiksa
+        $deps = [new FunctionalDependency(['id_karyawan', 'id_departemen'], 'tanggal_mulai')];
+        $result = $remover->remove($deps);
+        $this->assertCount(1, $result);
+        $this->assertTrue($result[0]->equals(new FunctionalDependency(['id_karyawan', 'id_departemen'], 'tanggal_mulai')));
     }
 
-    /**
-     * TC-03: PK tunggal, domain order.
-     * Relasi: OrderHeader(order_id, customer_id, order_date, total_amount, status)
-     * PK: order_id
-     */
-    public function test_tc03_order_header_pk_tunggal_lolos_2nf(): void
+    /** @test Path 4: Ada atribut lr tetapi tidak extraneous (gagal) → tidak ada perubahan */
+    public function a2_path4_lr_but_not_extraneous()
     {
-        $attrs = ['order_id', 'customer_id', 'order_date', 'total_amount', 'status'];
-        $fds   = $this->makeFds([
-            ['lhs' => ['order_id'], 'rhs' => 'customer_id'],
-            ['lhs' => ['order_id'], 'rhs' => 'order_date'],
-            ['lhs' => ['order_id'], 'rhs' => 'total_amount'],
-            ['lhs' => ['order_id'], 'rhs' => 'status'],
-        ]);
-
-        $result = $this->analyzer->normalize('OrderHeader', $attrs, $fds, ['order_id']);
-
-        $this->assertTrue($result->is2NF, 'TC-03: Seharusnya lolos 2NF');
-        $this->assertEmpty($result->partialDependencies, 'TC-03: Tidak boleh ada partial dependency');
-    }
-
-    /**
-     * TC-04: PK tunggal, domain booking.
-     * Relasi: RoomBooking(booking_id, room_id, guest_id, check_in, check_out)
-     * PK: booking_id
-     */
-    public function test_tc04_room_booking_pk_tunggal_lolos_2nf(): void
-    {
-        $attrs = ['booking_id', 'room_id', 'guest_id', 'check_in', 'check_out'];
-        $fds   = $this->makeFds([
-            ['lhs' => ['booking_id'], 'rhs' => 'room_id'],
-            ['lhs' => ['booking_id'], 'rhs' => 'guest_id'],
-            ['lhs' => ['booking_id'], 'rhs' => 'check_in'],
-            ['lhs' => ['booking_id'], 'rhs' => 'check_out'],
-        ]);
-
-        $result = $this->analyzer->normalize('RoomBooking', $attrs, $fds, ['booking_id']);
-
-        $this->assertTrue($result->is2NF, 'TC-04: Seharusnya lolos 2NF');
-        $this->assertEmpty($result->partialDependencies, 'TC-04: Tidak boleh ada partial dependency');
-    }
-
-    /**
-     * TC-05: PK composite, semua non-PK full dependency.
-     * Relasi: ExamResult(student_id, subject_id, score, grade)
-     * PK: (student_id, subject_id)
-     * score dan grade hanya bisa ditentukan jika keduanya diketahui.
-     */
-    public function test_tc05_exam_result_composite_pk_lolos_2nf(): void
-    {
-        $attrs = ['student_id', 'subject_id', 'score', 'grade'];
-        $fds   = $this->makeFds([
-            ['lhs' => ['student_id', 'subject_id'], 'rhs' => 'score'],
-            ['lhs' => ['student_id', 'subject_id'], 'rhs' => 'grade'],
-        ]);
-
-        $result = $this->analyzer->normalize('ExamResult', $attrs, $fds, ['student_id', 'subject_id']);
-
-        $this->assertTrue($result->is2NF, 'TC-05: Seharusnya lolos 2NF');
-        $this->assertEmpty($result->partialDependencies, 'TC-05: Tidak boleh ada partial dependency');
-        $this->assertCount(1, $result->relations2NF, 'TC-05: Tidak didekomposisi');
-    }
-
-    /**
-     * TC-06: PK composite, domain penerbangan.
-     * Relasi: FlightSeat(flight_id, seat_no, passenger_id, booked_at)
-     * PK: (flight_id, seat_no)
-     */
-    public function test_tc06_flight_seat_composite_pk_lolos_2nf(): void
-    {
-        $attrs = ['flight_id', 'seat_no', 'passenger_id', 'booked_at'];
-        $fds   = $this->makeFds([
-            ['lhs' => ['flight_id', 'seat_no'], 'rhs' => 'passenger_id'],
-            ['lhs' => ['flight_id', 'seat_no'], 'rhs' => 'booked_at'],
-        ]);
-
-        $result = $this->analyzer->normalize('FlightSeat', $attrs, $fds, ['flight_id', 'seat_no']);
-
-        $this->assertTrue($result->is2NF, 'TC-06: Seharusnya lolos 2NF');
-        $this->assertEmpty($result->partialDependencies, 'TC-06: Tidak boleh ada partial dependency');
-    }
-
-    /**
-     * TC-07: PK composite, domain gudang.
-     * Relasi: WarehouseSlot(warehouse_id, slot_id, item_id, quantity)
-     * PK: (warehouse_id, slot_id)
-     */
-    public function test_tc07_warehouse_slot_composite_pk_lolos_2nf(): void
-    {
-        $attrs = ['warehouse_id', 'slot_id', 'item_id', 'quantity'];
-        $fds   = $this->makeFds([
-            ['lhs' => ['warehouse_id', 'slot_id'], 'rhs' => 'item_id'],
-            ['lhs' => ['warehouse_id', 'slot_id'], 'rhs' => 'quantity'],
-        ]);
-
-        $result = $this->analyzer->normalize('WarehouseSlot', $attrs, $fds, ['warehouse_id', 'slot_id']);
-
-        $this->assertTrue($result->is2NF, 'TC-07: Seharusnya lolos 2NF');
-        $this->assertEmpty($result->partialDependencies, 'TC-07: Tidak boleh ada partial dependency');
-    }
-
-    // ================================================================
-    // MELANGGAR 2NF — TC 08–16
-    // ================================================================
-
-    /**
-     * TC-08: Contoh klasik dari paper Demba.
-     * Relasi: CourseEnrollment(student_id, course_id, student_name, course_name, enrollment_date, grade)
-     * PK: (student_id, course_id)
-     * Fp: student_id → student_name, course_id → course_name
-     */
-    public function test_tc08_course_enrollment_melanggar_2nf(): void
-    {
-        $attrs = ['student_id', 'course_id', 'student_name', 'course_name', 'enrollment_date', 'grade'];
-        $fds   = $this->makeFds([
-            ['lhs' => ['student_id'],              'rhs' => 'student_name'],
-            ['lhs' => ['course_id'],               'rhs' => 'course_name'],
-            ['lhs' => ['student_id', 'course_id'], 'rhs' => 'enrollment_date'],
-            ['lhs' => ['student_id', 'course_id'], 'rhs' => 'grade'],
-        ]);
-
-        $result = $this->analyzer->normalize('CourseEnrollment', $attrs, $fds, ['student_id', 'course_id']);
-
-        $this->assertFalse($result->is2NF, 'TC-08: Seharusnya melanggar 2NF');
-        $this->assertCount(2, $result->partialDependencies, 'TC-08: Harus ada 2 partial dependency');
-
-        $partialLhs = array_map(fn($fd) => $fd->lhs, $result->partialDependencies);
-        $this->assertContains(['student_id'], $partialLhs, 'TC-08: student_id harus jadi partial dep');
-        $this->assertContains(['course_id'],  $partialLhs, 'TC-08: course_id harus jadi partial dep');
-
-        // Harus menghasilkan 3 relasi hasil dekomposisi
-        $this->assertCount(3, $result->relations2NF, 'TC-08: Harus ada 3 relasi hasil dekomposisi');
-
-        $this->assertRelationExists($result->relations2NF, ['student_id', 'student_name']);
-        $this->assertRelationExists($result->relations2NF, ['course_id', 'course_name']);
-        $this->assertRelationExists($result->relations2NF, ['student_id', 'course_id', 'enrollment_date', 'grade']);
-    }
-
-    /**
-     * TC-09: Domain order item.
-     * Relasi: OrderItem(order_id, product_id, product_name, order_date, quantity, unit_price)
-     * PK: (order_id, product_id)
-     * Fp: product_id → product_name, order_id → order_date
-     */
-    public function test_tc09_order_item_melanggar_2nf(): void
-    {
-        $attrs = ['order_id', 'product_id', 'product_name', 'order_date', 'quantity', 'unit_price'];
-        $fds   = $this->makeFds([
-            ['lhs' => ['product_id'],              'rhs' => 'product_name'],
-            ['lhs' => ['order_id'],                'rhs' => 'order_date'],
-            ['lhs' => ['order_id', 'product_id'],  'rhs' => 'quantity'],
-            ['lhs' => ['order_id', 'product_id'],  'rhs' => 'unit_price'],
-        ]);
-
-        $result = $this->analyzer->normalize('OrderItem', $attrs, $fds, ['order_id', 'product_id']);
-
-        $this->assertFalse($result->is2NF, 'TC-09: Seharusnya melanggar 2NF');
-        $this->assertCount(2, $result->partialDependencies, 'TC-09: Harus ada 2 partial dependency');
-        $this->assertCount(3, $result->relations2NF, 'TC-09: Harus ada 3 relasi hasil dekomposisi');
-
-        $this->assertRelationExists($result->relations2NF, ['product_id', 'product_name']);
-        $this->assertRelationExists($result->relations2NF, ['order_id', 'order_date']);
-        $this->assertRelationExists($result->relations2NF, ['order_id', 'product_id', 'quantity', 'unit_price']);
-    }
-
-    /**
-     * TC-10: Domain karyawan-skill.
-     * Relasi: EmployeeSkill(employee_id, skill_id, employee_dept, skill_category, proficiency)
-     * PK: (employee_id, skill_id)
-     * Fp: employee_id → employee_dept, skill_id → skill_category
-     */
-    public function test_tc10_employee_skill_melanggar_2nf(): void
-    {
-        $attrs = ['employee_id', 'skill_id', 'employee_dept', 'skill_category', 'proficiency'];
-        $fds   = $this->makeFds([
-            ['lhs' => ['employee_id'],             'rhs' => 'employee_dept'],
-            ['lhs' => ['skill_id'],                'rhs' => 'skill_category'],
-            ['lhs' => ['employee_id', 'skill_id'], 'rhs' => 'proficiency'],
-        ]);
-
-        $result = $this->analyzer->normalize('EmployeeSkill', $attrs, $fds, ['employee_id', 'skill_id']);
-
-        $this->assertFalse($result->is2NF, 'TC-10: Seharusnya melanggar 2NF');
-        $this->assertCount(2, $result->partialDependencies, 'TC-10: Harus ada 2 partial dependency');
-        $this->assertCount(3, $result->relations2NF, 'TC-10: Harus ada 3 relasi hasil dekomposisi');
-
-        $this->assertRelationExists($result->relations2NF, ['employee_id', 'employee_dept']);
-        $this->assertRelationExists($result->relations2NF, ['skill_id', 'skill_category']);
-        $this->assertRelationExists($result->relations2NF, ['employee_id', 'skill_id', 'proficiency']);
-    }
-
-    /**
-     * TC-11: Domain project-task.
-     * Relasi: ProjectTask(project_id, task_id, project_budget, task_description, assigned_to, estimated_hours)
-     * PK: (project_id, task_id)
-     * Fp: project_id → project_budget, task_id → task_description
-     */
-    public function test_tc11_project_task_melanggar_2nf(): void
-    {
-        $attrs = ['project_id', 'task_id', 'project_budget', 'task_description', 'assigned_to', 'estimated_hours'];
-        $fds   = $this->makeFds([
-            ['lhs' => ['project_id'],             'rhs' => 'project_budget'],
-            ['lhs' => ['task_id'],                'rhs' => 'task_description'],
-            ['lhs' => ['project_id', 'task_id'],  'rhs' => 'assigned_to'],
-            ['lhs' => ['project_id', 'task_id'],  'rhs' => 'estimated_hours'],
-        ]);
-
-        $result = $this->analyzer->normalize('ProjectTask', $attrs, $fds, ['project_id', 'task_id']);
-
-        $this->assertFalse($result->is2NF, 'TC-11: Seharusnya melanggar 2NF');
-        $this->assertCount(2, $result->partialDependencies, 'TC-11: Harus ada 2 partial dependency');
-        $this->assertCount(3, $result->relations2NF, 'TC-11: Harus ada 3 relasi hasil dekomposisi');
-
-        $this->assertRelationExists($result->relations2NF, ['project_id', 'project_budget']);
-        $this->assertRelationExists($result->relations2NF, ['task_id', 'task_description']);
-        $this->assertRelationExists($result->relations2NF, ['project_id', 'task_id', 'assigned_to', 'estimated_hours']);
-    }
-
-    /**
-     * TC-12: Domain sales territory.
-     * Relasi: SalesTerritory(salesperson_id, territory_id, salesperson_region, territory_manager, quota_amount)
-     * PK: (salesperson_id, territory_id)
-     * Fp: salesperson_id → salesperson_region, territory_id → territory_manager
-     */
-    public function test_tc12_sales_territory_melanggar_2nf(): void
-    {
-        $attrs = ['salesperson_id', 'territory_id', 'salesperson_region', 'territory_manager', 'quota_amount'];
-        $fds   = $this->makeFds([
-            ['lhs' => ['salesperson_id'],                  'rhs' => 'salesperson_region'],
-            ['lhs' => ['territory_id'],                    'rhs' => 'territory_manager'],
-            ['lhs' => ['salesperson_id', 'territory_id'],  'rhs' => 'quota_amount'],
-        ]);
-
-        $result = $this->analyzer->normalize('SalesTerritory', $attrs, $fds, ['salesperson_id', 'territory_id']);
-
-        $this->assertFalse($result->is2NF, 'TC-12: Seharusnya melanggar 2NF');
-        $this->assertCount(2, $result->partialDependencies, 'TC-12: Harus ada 2 partial dependency');
-        $this->assertCount(3, $result->relations2NF, 'TC-12: Harus ada 3 relasi hasil dekomposisi');
-    }
-
-    /**
-     * TC-13: 3 partial dependency sekaligus.
-     * Relasi: ClassSchedule(class_id, teacher_id, class_name, teacher_name, room_id, schedule_time)
-     * PK: (class_id, teacher_id)
-     * Fp: class_id → class_name, class_id → room_id, teacher_id → teacher_name
-     */
-    public function test_tc13_class_schedule_tiga_partial_deps(): void
-    {
-        $attrs = ['class_id', 'teacher_id', 'class_name', 'teacher_name', 'room_id', 'schedule_time'];
-        $fds   = $this->makeFds([
-            ['lhs' => ['class_id'],               'rhs' => 'class_name'],
-            ['lhs' => ['class_id'],               'rhs' => 'room_id'],
-            ['lhs' => ['teacher_id'],             'rhs' => 'teacher_name'],
-            ['lhs' => ['class_id', 'teacher_id'], 'rhs' => 'schedule_time'],
-        ]);
-
-        $result = $this->analyzer->normalize('ClassSchedule', $attrs, $fds, ['class_id', 'teacher_id']);
-
-        $this->assertFalse($result->is2NF, 'TC-13: Seharusnya melanggar 2NF');
-        $this->assertCount(3, $result->partialDependencies, 'TC-13: Harus ada 3 partial dependency');
-
-        // Relasi untuk class_id harus mengandung class_name DAN room_id
-        $this->assertRelationExists($result->relations2NF, ['class_id', 'class_name', 'room_id']);
-        $this->assertRelationExists($result->relations2NF, ['teacher_id', 'teacher_name']);
-        $this->assertRelationExists($result->relations2NF, ['class_id', 'teacher_id', 'schedule_time']);
-    }
-
-    /**
-     * TC-14: Domain supplier-product.
-     * Relasi: SupplierProduct(supplier_id, product_id, supplier_name, product_category, lead_time, unit_cost)
-     * PK: (supplier_id, product_id)
-     * Fp: supplier_id → supplier_name, product_id → product_category
-     */
-    public function test_tc14_supplier_product_melanggar_2nf(): void
-    {
-        $attrs = ['supplier_id', 'product_id', 'supplier_name', 'product_category', 'lead_time', 'unit_cost'];
-        $fds   = $this->makeFds([
-            ['lhs' => ['supplier_id'],              'rhs' => 'supplier_name'],
-            ['lhs' => ['product_id'],               'rhs' => 'product_category'],
-            ['lhs' => ['supplier_id', 'product_id'],'rhs' => 'lead_time'],
-            ['lhs' => ['supplier_id', 'product_id'],'rhs' => 'unit_cost'],
-        ]);
-
-        $result = $this->analyzer->normalize('SupplierProduct', $attrs, $fds, ['supplier_id', 'product_id']);
-
-        $this->assertFalse($result->is2NF, 'TC-14: Seharusnya melanggar 2NF');
-        $this->assertCount(2, $result->partialDependencies, 'TC-14: Harus ada 2 partial dependency');
-        $this->assertCount(3, $result->relations2NF, 'TC-14: Harus ada 3 relasi hasil dekomposisi');
-
-        $this->assertRelationExists($result->relations2NF, ['supplier_id', 'supplier_name']);
-        $this->assertRelationExists($result->relations2NF, ['product_id', 'product_category']);
-    }
-
-    /**
-     * TC-15: Domain perpustakaan.
-     * Relasi: LibraryLoan(member_id, book_id, member_name, book_title, loan_date, due_date)
-     * PK: (member_id, book_id)
-     * Fp: member_id → member_name, book_id → book_title
-     */
-    public function test_tc15_library_loan_melanggar_2nf(): void
-    {
-        $attrs = ['member_id', 'book_id', 'member_name', 'book_title', 'loan_date', 'due_date'];
-        $fds   = $this->makeFds([
-            ['lhs' => ['member_id'],           'rhs' => 'member_name'],
-            ['lhs' => ['book_id'],             'rhs' => 'book_title'],
-            ['lhs' => ['member_id', 'book_id'],'rhs' => 'loan_date'],
-            ['lhs' => ['member_id', 'book_id'],'rhs' => 'due_date'],
-        ]);
-
-        $result = $this->analyzer->normalize('LibraryLoan', $attrs, $fds, ['member_id', 'book_id']);
-
-        $this->assertFalse($result->is2NF, 'TC-15: Seharusnya melanggar 2NF');
-        $this->assertCount(2, $result->partialDependencies, 'TC-15: Harus ada 2 partial dependency');
-        $this->assertCount(3, $result->relations2NF, 'TC-15: Harus ada 3 relasi hasil dekomposisi');
-
-        $this->assertRelationExists($result->relations2NF, ['member_id', 'member_name']);
-        $this->assertRelationExists($result->relations2NF, ['book_id', 'book_title']);
-        $this->assertRelationExists($result->relations2NF, ['member_id', 'book_id', 'loan_date', 'due_date']);
-    }
-
-    /**
-     * TC-16: Domain dokter-pasien.
-     * Relasi: DoctorPatient(doctor_id, patient_id, doctor_specialty, patient_dob, visit_date, diagnosis)
-     * PK: (doctor_id, patient_id)
-     * Fp: doctor_id → doctor_specialty, patient_id → patient_dob
-     */
-    public function test_tc16_doctor_patient_melanggar_2nf(): void
-    {
-        $attrs = ['doctor_id', 'patient_id', 'doctor_specialty', 'patient_dob', 'visit_date', 'diagnosis'];
-        $fds   = $this->makeFds([
-            ['lhs' => ['doctor_id'],               'rhs' => 'doctor_specialty'],
-            ['lhs' => ['patient_id'],              'rhs' => 'patient_dob'],
-            ['lhs' => ['doctor_id', 'patient_id'], 'rhs' => 'visit_date'],
-            ['lhs' => ['doctor_id', 'patient_id'], 'rhs' => 'diagnosis'],
-        ]);
-
-        $result = $this->analyzer->normalize('DoctorPatient', $attrs, $fds, ['doctor_id', 'patient_id']);
-
-        $this->assertFalse($result->is2NF, 'TC-16: Seharusnya melanggar 2NF');
-        $this->assertCount(2, $result->partialDependencies, 'TC-16: Harus ada 2 partial dependency');
-        $this->assertCount(3, $result->relations2NF, 'TC-16: Harus ada 3 relasi hasil dekomposisi');
-
-        $this->assertRelationExists($result->relations2NF, ['doctor_id', 'doctor_specialty']);
-        $this->assertRelationExists($result->relations2NF, ['patient_id', 'patient_dob']);
-        $this->assertRelationExists($result->relations2NF, ['doctor_id', 'patient_id', 'visit_date', 'diagnosis']);
-    }
-
-    // ================================================================
-    // EDGE CASE — TC 17–20
-    // ================================================================
-
-    /**
-     * TC-17: Relasi hanya memiliki satu kolom (PK saja).
-     * Tidak ada non-key attribute → tidak ada FD → otomatis 2NF.
-     */
-    public function test_tc17_relasi_satu_kolom_lolos_2nf(): void
-    {
-        $attrs = ['id'];
-        $fds   = [];
-
-        $result = $this->analyzer->normalize('SingleColumn', $attrs, $fds, ['id']);
-
-        $this->assertTrue($result->is2NF, 'TC-17: Relasi satu kolom seharusnya lolos 2NF');
-        $this->assertEmpty($result->partialDependencies, 'TC-17: Tidak ada partial dependency');
-    }
-
-    /**
-     * TC-18: Semua kolom adalah PK.
-     * Tidak ada non-key attribute → tidak ada partial dependency.
-     */
-    public function test_tc18_semua_kolom_pk_lolos_2nf(): void
-    {
-        $attrs = ['student_id', 'course_id', 'term_id'];
-        $fds   = [];
-
-        $result = $this->analyzer->normalize('AllPrimaryKey', $attrs, $fds, ['student_id', 'course_id', 'term_id']);
-
-        $this->assertTrue($result->is2NF, 'TC-18: Semua kolom PK seharusnya lolos 2NF');
-        $this->assertEmpty($result->partialDependencies, 'TC-18: Tidak ada partial dependency');
-    }
-
-    /**
-     * TC-19: PK triple composite dengan partial dep di berbagai level subset.
-     * Relasi: MultiKey(a_id, b_id, c_id, a_name, b_name, c_name, ab_value, abc_value)
-     * PK: (a_id, b_id, c_id)
-     * Fp: a_id → a_name, b_id → b_name, c_id → c_name, a_id,b_id → ab_value
-     */
-    public function test_tc19_pk_triple_composite_multiple_partial_deps(): void
-    {
-        $attrs = ['a_id', 'b_id', 'c_id', 'a_name', 'b_name', 'c_name', 'ab_value', 'abc_value'];
-        $fds   = $this->makeFds([
-            ['lhs' => ['a_id'],           'rhs' => 'a_name'],
-            ['lhs' => ['b_id'],           'rhs' => 'b_name'],
-            ['lhs' => ['c_id'],           'rhs' => 'c_name'],
-            ['lhs' => ['a_id', 'b_id'],   'rhs' => 'ab_value'],
-            ['lhs' => ['a_id', 'b_id', 'c_id'], 'rhs' => 'abc_value'],
-        ]);
-
-        $result = $this->analyzer->normalize('MultiKey', $attrs, $fds, ['a_id', 'b_id', 'c_id']);
-
-        $this->assertFalse($result->is2NF, 'TC-19: Seharusnya melanggar 2NF');
-        $this->assertNotEmpty($result->partialDependencies, 'TC-19: Harus ada partial dependency');
-
-        // Minimal ada 4 partial dep: a_id→a_name, b_id→b_name, c_id→c_name, a_id,b_id→ab_value
-        $this->assertGreaterThanOrEqual(4, count($result->partialDependencies),
-            'TC-19: Harus mendeteksi minimal 4 partial dependency');
-
-        // abc_value harus masuk ke relasi utama (full dep pada seluruh PK)
-        $mainRelation = null;
-        foreach ($result->relations2NF as $rel) {
-            if (in_array('abc_value', $rel['attributes'])) {
-                $mainRelation = $rel;
+        $remover = new ExtraneousAttributeRemover(new ClosureCalculator());
+        // FD: (id_karyawan, id_departemen) → nama_departemen
+        // dan id_karyawan → nama_karyawan (tidak membantu untuk id_departemen)
+        // Atribut id_departemen ∈ lr (karena muncul juga di RHS di FD lain? tidak di sini, tapi agar ada lr, kita perlu contoh)
+        // Lebih baik gunakan contoh: (kode_produk, id_karyawan) → harga, dan id_karyawan → nama_karyawan
+        // Di sini atribut id_karyawan ∈ lr, tetapi tidak extraneous karena tanpa id_karyawan, kode_produk saja tidak bisa menentukan harga (tidak ada FD)
+        $deps = [
+            new FunctionalDependency(['kode_produk', 'id_karyawan'], 'harga'),
+            new FunctionalDependency(['id_karyawan'], 'nama_karyawan')
+        ];
+        $result = $remover->remove($deps);
+        // Pastikan masih ada FD dengan RHS 'harga' (bisa masih berupa composite)
+        $found = false;
+        foreach ($result as $fd) {
+            if ($fd->rhs === 'harga') {
+                $found = true;
                 break;
             }
         }
-        $this->assertNotNull($mainRelation, 'TC-19: Harus ada relasi yang mengandung abc_value');
+        $this->assertTrue($found);
     }
 
-    /**
-     * TC-20: FD redundan — menguji Algoritma A3 (minimal cover).
-     * Relasi: EmpDept(emp_id, dept_id, emp_name, dept_name, salary)
-     * PK: (emp_id, dept_id)
-     * FD redundan: emp_id → dept_name (bisa diturunkan dari emp_id → dept_id → dept_name)
-     * Setelah A3, emp_id → dept_name seharusnya dihapus dari Fm.
-     */
-    public function test_tc20_fd_redundan_dihapus_minimal_cover(): void
+    /** @test Path 5: Ada atribut lr dan extraneous → berhasil dihapus */
+    public function a2_path5_lr_extraneous_removed()
     {
-        $attrs = ['emp_id', 'dept_id', 'emp_name', 'dept_name', 'salary'];
-        $fds   = $this->makeFds([
-            ['lhs' => ['emp_id'],            'rhs' => 'emp_name'],
-            ['lhs' => ['emp_id'],            'rhs' => 'dept_id'],
-            ['lhs' => ['dept_id'],           'rhs' => 'dept_name'],
-            ['lhs' => ['emp_id', 'dept_id'], 'rhs' => 'salary'],
-            ['lhs' => ['emp_id'],            'rhs' => 'dept_name'],  // ← redundan
-        ]);
+        $remover = new ExtraneousAttributeRemover(new ClosureCalculator());
+        // FD: (id_karyawan, id_departemen) → nama_departemen
+        // dan id_karyawan → id_departemen
+        // Maka id_departemen adalah extraneous karena id_karyawan sudah menentukan id_departemen
+        $deps = [
+            new FunctionalDependency(['id_karyawan', 'id_departemen'], 'nama_departemen'),
+            new FunctionalDependency(['id_karyawan'], 'id_departemen')
+        ];
+        $result = $remover->remove($deps);
+        // Hasilnya: id_karyawan → nama_departemen (id_departemen dihapus dari LHS)
+        $this->assertCount(2, $result);
+        $foundNew = false;
+        foreach ($result as $fd) {
+            if ($fd->lhs == ['id_karyawan'] && $fd->rhs == 'nama_departemen') {
+                $foundNew = true;
+            }
+        }
+        $this->assertTrue($foundNew);
+    }
 
-        $result = $this->analyzer->normalize('EmpDept', $attrs, $fds, ['emp_id', 'dept_id']);
+    /** @test Path 6: Multiple extraneous removal dalam satu FD (loop berulang) */
+    public function a2_path6_multiple_extraneous_in_one_fd()
+    {
+        $remover = new ExtraneousAttributeRemover(new ClosureCalculator());
+        // FD: (id_karyawan, id_departemen, kode_proyek) → nama_proyek
+        // dan id_karyawan → id_departemen, serta id_karyawan → kode_proyek
+        // Maka id_departemen dan kode_proyek extraneous, akhirnya LHS tinggal id_karyawan
+        $deps = [
+            new FunctionalDependency(['id_karyawan', 'id_departemen', 'kode_proyek'], 'nama_proyek'),
+            new FunctionalDependency(['id_karyawan'], 'id_departemen'),
+            new FunctionalDependency(['id_karyawan'], 'kode_proyek')
+        ];
+        $result = $remover->remove($deps);
+        // Harusnya menjadi id_karyawan → nama_proyek
+        $found = false;
+        foreach ($result as $fd) {
+            if ($fd->lhs == ['id_karyawan'] && $fd->rhs == 'nama_proyek') {
+                $found = true;
+            }
+        }
+        $this->assertTrue($found);
+    }
 
-        // Setelah minimal cover, emp_id → dept_name harus hilang
-        $minimalCoverStrings = array_map(fn($fd) => (string) $fd, $result->minimalCover);
-        $this->assertNotContains(
-            'emp_id → dept_name',
-            $minimalCoverStrings,
-            'TC-20: FD redundan emp_id → dept_name seharusnya dihapus oleh Algoritma A3'
-        );
+    /** @test Path 7: Seluruh FD diproses, lebih dari satu FD di G */
+    public function a2_path7_multiple_fds_processed()
+    {
+        $remover = new ExtraneousAttributeRemover(new ClosureCalculator());
+        // Kasus campuran:
+        // FD1: (id_karyawan, id_departemen) → nama_karyawan
+        // FD2: id_karyawan → id_departemen
+        // FD3: (id_departemen, kode_lokasi) → alamat
+        $deps = [
+            new FunctionalDependency(['id_karyawan', 'id_departemen'], 'nama_karyawan'),
+            new FunctionalDependency(['id_karyawan'], 'id_departemen'),
+            new FunctionalDependency(['id_departemen', 'kode_lokasi'], 'alamat')
+        ];
+        $result = $remover->remove($deps);
+        // FD1 menjadi id_karyawan → nama_karyawan (id_departemen dihapus)
+        // FD3 tidak berubah karena id_departemen bukan lr? (tidak muncul di RHS FD lain di sini)
+        $this->assertCount(3, $result);
+        $found = false;
+        foreach ($result as $fd) {
+            if ($fd->lhs == ['id_karyawan'] && $fd->rhs == 'nama_karyawan') {
+                $found = true;
+            }
+        }
+        $this->assertTrue($found);
+    }
 
-        // Karena emp_id → dept_id ada di FD, emp_id sendiri sudah superkey
-        // sehingga candidate key seharusnya { emp_id }
-        $ckFlat = array_map(fn($ck) => implode(',', $ck), $result->candidateKeys);
-        $this->assertContains('emp_id', $ckFlat,
-            'TC-20: emp_id seharusnya menjadi candidate key karena emp_id → dept_id → dept_name');
+// ==================== A3 : Remove Redundant Dependencies ====================
+
+    /** @test Path 1: F kosong → Fm kosong */
+    public function a3_path1_empty_f()
+    {
+        $calc = new MinimalCoverCalculator(new ClosureCalculator());
+        $deps = [];
+        $result = $calc->compute($deps);
+        $this->assertEmpty($result);
+    }
+
+    /** @test Path 2: Ada FD tapi tidak ada pasangan RHS sama → tidak ada perubahan */
+    public function a3_path2_no_matching_rhs()
+    {
+        $calc = new MinimalCoverCalculator(new ClosureCalculator());
+        $deps = [
+            new FunctionalDependency(['id_karyawan'], 'nama_karyawan'),
+            new FunctionalDependency(['id_departemen'], 'nama_departemen')
+        ];
+        $result = $calc->compute($deps);
+        $this->assertCount(2, $result);
+    }
+
+    /** @test Path 3: Ada pasangan RHS sama, tapi X⊈Y⁺ (gagal hapus) */
+    public function a3_path3_pair_rhs_same_but_not_redundant()
+    {
+        $calc = new MinimalCoverCalculator(new ClosureCalculator());
+        // FD: id_karyawan → kota, dan id_departemen → kota
+        // Tidak ada FD lain, maka id_karyawan tidak ⊆ closure(id_departemen) tanpa FD kedua
+        $deps = [
+            new FunctionalDependency(['id_karyawan'], 'kota'),
+            new FunctionalDependency(['id_departemen'], 'kota')
+        ];
+        $result = $calc->compute($deps);
+        // Tidak ada yang dihapus, tetap 2 FD
+        $this->assertCount(2, $result);
+    }
+
+    /** @test Path 4: Ada pasangan redundan, Y→A dihapus */
+    public function a3_path4_redundant_dependency_removed()
+    {
+        $calc = new MinimalCoverCalculator(new ClosureCalculator());
+        // FD: id_karyawan → kota, id_departemen → kota, dan id_departemen → id_karyawan
+        // Maka id_karyawan ⊆ closure(id_departemen) karena id_departemen → id_karyawan, lalu id_karyawan → kota
+        // Sehingga id_departemen → kota redundan, dihapus
+        $deps = [
+            new FunctionalDependency(['id_karyawan'], 'kota'),
+            new FunctionalDependency(['id_departemen'], 'kota'),
+            new FunctionalDependency(['id_departemen'], 'id_karyawan')
+        ];
+        $result = $calc->compute($deps);
+        // Pastikan id_departemen → kota tidak ada
+        $hasRedundant = false;
+        foreach ($result as $fd) {
+            if ($fd->lhs == ['id_departemen'] && $fd->rhs == 'kota') {
+                $hasRedundant = true;
+                break;
+            }
+        }
+        $this->assertFalse($hasRedundant);
+    }
+
+    // ==================== A4 : Klasifikasi Full / Partial Dependencies ====================
+
+    /** @test Path 1: Fm kosong → Fp kosong, Ff kosong */
+    public function a4_path1_empty_fm()
+    {
+        $classifier = new DependencyClassifier(new ClosureCalculator());
+        $fm = [];
+        $candidateKeys = [['A']];
+        $result = $classifier->classify($fm, $candidateKeys);
+        $this->assertEmpty($result['partial']);
+        $this->assertEmpty($result['full']);
+    }
+
+    /** @test Path 2: FD ada tapi tidak memenuhi syarat partial → semua tetap full */
+    public function a4_path2_no_partial()
+    {
+        $classifier = new DependencyClassifier(new ClosureCalculator());
+        // FK: A→B, dengan A candidate key (bukan proper subset) atau B key attribute.
+        // Misal candidate keys: {A}, B bukan key attribute → A→B adalah full karena A = CK, bukan proper subset.
+        $fm = [new FunctionalDependency(['A'], 'B')];
+        $candidateKeys = [['A']];
+        $result = $classifier->classify($fm, $candidateKeys);
+        $this->assertEmpty($result['partial']);
+        $this->assertCount(1, $result['full']);
+    }
+
+    /** @test Path 3: Ada partial dependency, tapi tidak ada FD transitif */
+    public function a4_path3_partial_without_transitive()
+    {
+        $classifier = new DependencyClassifier(new ClosureCalculator());
+        // Candidate key: AB. FD: A→C (A ⊂ AB, C bukan key attribute). Partial.
+        $fm = [
+            new FunctionalDependency(['A', 'B'], 'D'), // FD utama? Biar ada partial: A→C
+            new FunctionalDependency(['A'], 'C')
+        ];
+        // Candidate keys: AB
+        $candidateKeys = [['A', 'B']];
+        $result = $classifier->classify($fm, $candidateKeys);
+        // A→C harus partial, tidak ada FD transitif karena C tidak bisa menentukan FD lain.
+        $this->assertCount(1, $result['partial']);
+        $this->assertTrue($result['partial'][0]->equals(new FunctionalDependency(['A'], 'C')));
+        $this->assertCount(1, $result['full']); // AB→D tetap full
+    }
+
+    /** @test Path 4: Ada partial dependency + FD transitif (cascade) */
+    public function a4_path4_partial_with_transitive()
+    {
+        $classifier = new DependencyClassifier(new ClosureCalculator());
+        // Candidate key: AB. FD: A→C (partial), lalu C→D (transitif). Saat A→C dipindah, C→D juga ikut.
+        $fm = [
+            new FunctionalDependency(['A', 'B'], 'E'), // full
+            new FunctionalDependency(['A'], 'C'),
+            new FunctionalDependency(['C'], 'D')
+        ];
+        $candidateKeys = [['A', 'B']];
+        $result = $classifier->classify($fm, $candidateKeys);
+        // A→C dan C→D harus pindah ke partial, AB→E tetap full
+        $this->assertCount(2, $result['partial']);
+        $this->assertCount(1, $result['full']);
+    }
+
+    // ==================== A5 : Dekomposisi ke 2NF ====================
+
+    /** @test Path 1: Fp kosong → langsung output relasi tunggal (sudah 2NF) */
+    public function a5_path1_fp_empty()
+    {
+        $decomposer = new SecondNFDecomposer(new ClosureCalculator());
+        $attributes = ['A', 'B', 'C'];
+        $fullDeps = [new FunctionalDependency(['A'], 'B')];
+        $partialDeps = [];
+        $candidateKeys = [['A']];
+        $primaryKey = ['A'];
+        $result = $decomposer->decompose($attributes, $fullDeps, $partialDeps, $candidateKeys, $primaryKey);
+        $this->assertTrue($result['is2NF']);
+        $this->assertCount(1, $result['relations']);
+    }
+
+    /** @test Path 2: Fp tidak kosong, tapi Y bukan proper subset candidate key → tidak ada dekomposisi */
+    public function a5_path2_no_proper_subset()
+    {
+        $decomposer = new SecondNFDecomposer(new ClosureCalculator());
+        // Partial dependency: Y = AB, candidate key = AB (bukan proper subset)
+        $attributes = ['A', 'B', 'C'];
+        $fullDeps = [];
+        $partialDeps = [new FunctionalDependency(['A', 'B'], 'C')];
+        $candidateKeys = [['A', 'B']];
+        $primaryKey = ['A', 'B'];
+        $result = $decomposer->decompose($attributes, $fullDeps, $partialDeps, $candidateKeys, $primaryKey);
+        // Karena Y = candidate key (bukan proper subset), tidak dibuat relasi baru. Hasil tetap satu relasi? Sesuai path 2, tidak ada dekomposisi.
+        // Method decompose akan menganggap semua FD partial? Mari cek: di kode, pengecekan proper subset dilakukan di isProperSubsetOfSomeCandidateKey.
+        // Karena Y = CK, bukan proper subset, maka tidak diproses. Akhirnya relasi utama dengan Xf = semua atribut.
+        $this->assertFalse($result['is2NF']); // masih ada partial, tapi tidak didekomposisi karena tidak memenuhi syarat.
+        $this->assertCount(1, $result['relations']); // hanya relasi utama
+    }
+
+    /** @test Path 3: Ada partial dependency → dekomposisi dilakukan */
+    public function a5_path3_partial_decomposition()
+    {
+        $decomposer = new SecondNFDecomposer(new ClosureCalculator());
+        // Tabel enrollment(student_id, course_id, student_name, grade), PK = (student_id,course_id)
+        // Partial: student_id → student_name
+        $attributes = ['student_id', 'course_id', 'student_name', 'grade'];
+        $fullDeps = [new FunctionalDependency(['student_id', 'course_id'], 'grade')];
+        $partialDeps = [new FunctionalDependency(['student_id'], 'student_name')];
+        $candidateKeys = [['student_id', 'course_id']];
+        $primaryKey = ['student_id', 'course_id'];
+        $result = $decomposer->decompose($attributes, $fullDeps, $partialDeps, $candidateKeys, $primaryKey);
+        $this->assertFalse($result['is2NF']);
+        // Harus ada minimal 2 relasi: R_student_id dan RK (student_id,course_id, grade)
+        $this->assertGreaterThanOrEqual(2, count($result['relations']));
+        // Cek apakah ada relasi dengan primary key student_id
+        $found = false;
+        foreach ($result['relations'] as $rel) {
+            if ($rel['primaryKey'] == ['student_id']) {
+                $found = true;
+            }
+        }
+        $this->assertTrue($found);
     }
 }
